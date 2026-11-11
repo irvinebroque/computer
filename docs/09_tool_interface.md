@@ -400,6 +400,24 @@ const tools = createAITools({
 
 A pi caller runs each call itself, so it can instead pass the metadata with the call: `execute(call, { metadata })`. Metadata passed with a call wins over `exec: { metadata }`. A caller of `defineExec` passes `metadata` or `toolCallId` on each `execute` the same way.
 
+### Detaching
+
+By default, `exec` returns when its run ends. A run that waits for a person in [`ctx.interrupt()`](./17_isolate_javascript.md#waiting-for-an-answer), such as for an approval, can take hours, and the agent's turn waits with it: the agent can't tell anyone what it's doing until the answer comes. `detach` lets the tool return early and leave the run going on its own. It's experimental.
+
+```ts
+const tools = createAITools({
+  workspace,
+  exec: {
+    metadata: ({ toolCallId }) => ({ conversation: this.name, toolCall: toolCallId }),
+    detach: { onWait: true, afterMs: 60_000 },
+  },
+});
+```
+
+`onWait` returns once a call in the run waits for an answer, and `afterMs` once the run has gone on that long. Either way the reply is `{ executionId, status, stdout, stderr, note }`, with a `status` of `"waiting"` or `"running"` and, when waiting, the `waiting` calls' `callId`s and payloads. The tool description and the reply's `note` tell the model the run carries on and its outcome arrives later. Aborting the model turn kills a run that hasn't detached, but leaves one that has alone. A run that ends before it detaches returns as usual. Only runs on a module backend such as `CodemodeBackend` detach, since only it reports how a run ended. Runs on shell and container backends stay attached, and a tool with no module backend refuses `detach`.
+
+The tool doesn't deliver the outcome itself. The app hears it from the backend's [`onSettle`](./17_isolate_javascript.md#hearing-how-a-run-ended), finds the conversation through the run's `metadata`, and gives the agent a new message with it. `onSettle` hears about every run, so the app should skip runs whose tool call returned the outcome itself, for example by noting the `executionId` of each detached reply. `onWait` needs a runtime with `pending()`, which a `Workspace` and `workspace.stub()` have.
+
 Wire this tool carefully: it executes arbitrary shell commands inside the configured backend. Treat its output as untrusted text when including it in later model input. Pass `exec: { backends: {} }` or `readonly: true` when command execution is not part of the agent's job, and list backends explicitly when the Workspace has one the model should not use directly.
 
 ## `publish`
