@@ -1080,6 +1080,22 @@ describe("durable executions", () => {
     expect(await calls()).toEqual({ work: 2, gate: 2 });
   });
 
+  it("tells onSettle the metadata of a run that failed because it was interrupted", async () => {
+    await start("settle-fail-metadata", {
+      source,
+      onInterrupt: "fail",
+      metadata: { conversation: "c2" },
+    });
+    expect(await result("settle-fail-metadata")).toMatchObject({ status: "failed" });
+    let heard: Array<{ status: string; metadata: Record<string, string> }> = [];
+    for (let attempt = 0; attempt < 200 && heard.length === 0; attempt += 1) {
+      const response = await SELF.fetch("https://example.test/settles?id=settle-fail-metadata");
+      heard = (await response.json()) as typeof heard;
+      if (heard.length === 0) await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    expect(heard).toMatchObject([{ status: "failed", metadata: { conversation: "c2" } }]);
+  });
+
   it("replays the clock a run read before it was interrupted", async () => {
     await start("durable-clock", {
       source: `
@@ -1970,6 +1986,86 @@ describe("interrupts", () => {
     expect(settled.status).toBe("failed");
     // The test backend keeps 64 bytes of standard error.
     expect(settled.stderr).toContain("ctx.interrupt() needs a replayable run");
+  });
+
+  type Settled = {
+    id: string;
+    backend: string;
+    status: string;
+    exitCode: number;
+    result?: unknown;
+    metadata: Record<string, string>;
+    stdout: string;
+    stderr: string;
+    settledAt: number;
+  };
+
+  async function settles(id: string): Promise<Settled[]> {
+    const response = await SELF.fetch(`https://example.test/settles?id=${encodeURIComponent(id)}`);
+    return (await response.json()) as Settled[];
+  }
+
+  // What onSettle heard about a run, once it has heard anything.
+  async function settled(id: string): Promise<Settled[]> {
+    for (let attempt = 0; attempt < 200; attempt += 1) {
+      const heard = await settles(id);
+      if (heard.length > 0) return heard;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    throw new Error(`onSettle never heard about ${id}`);
+  }
+
+  it("tells onSettle how a run ended, once, after its answer", async () => {
+    await start("settle-answer", approval, { metadata: { conversation: "c1" } });
+    const call = await waitingCall("settle-answer");
+    expect(await settles("settle-answer")).toEqual([]);
+    await respond("settle-answer", call.callId, { ok: true });
+    expect(await result("settle-answer")).toMatchObject({ status: "completed" });
+    const [heard, ...rest] = await settled("settle-answer");
+    expect(rest).toEqual([]);
+    expect(heard).toMatchObject({
+      id: "settle-answer",
+      backend: "codemode",
+      status: "completed",
+      exitCode: 0,
+      result: { ok: true },
+      metadata: { conversation: "c1" },
+    });
+    expect(heard?.stdout).toContain("after true");
+    expect(heard?.settledAt).toBeGreaterThanOrEqual(call.since);
+  });
+
+  it("tells onSettle about a run killed while it waits", async () => {
+    await start("settle-kill", approval);
+    await waitingCall("settle-kill");
+    await SELF.fetch("https://example.test/runtime-kill?id=settle-kill", { method: "POST" });
+    expect(await settled("settle-kill")).toMatchObject([
+      { id: "settle-kill", status: "cancelled", exitCode: 130 },
+    ]);
+  });
+
+  it("tells onSettle again from recover() when the hook threw", async () => {
+    await SELF.fetch("https://example.test/refuse-settle?id=settle-retry", { method: "POST" });
+    await start("settle-retry", approval);
+    const call = await waitingCall("settle-retry");
+    await respond("settle-retry", call.callId, { ok: true });
+    expect(await result("settle-retry")).toMatchObject({ status: "completed" });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(await settles("settle-retry")).toEqual([]);
+    await SELF.fetch("https://example.test/durable-recover", { method: "POST" });
+    expect(await settles("settle-retry")).toMatchObject([{ status: "completed" }]);
+  });
+
+  it("tells onSettle after a restart about a run the hook missed", async () => {
+    await SELF.fetch("https://example.test/refuse-settle?id=settle-restart", { method: "POST" });
+    await start("settle-restart", approval);
+    const call = await waitingCall("settle-restart");
+    await respond("settle-restart", call.callId, { ok: true });
+    expect(await result("settle-restart")).toMatchObject({ status: "completed" });
+    await SELF.fetch("https://example.test/durable-restart", { method: "POST" });
+    // Any call reconnects the backend, which delivers what it still holds.
+    await pending("settle-restart");
+    expect(await settled("settle-restart")).toMatchObject([{ status: "completed" }]);
   });
 });
 

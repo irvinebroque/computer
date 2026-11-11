@@ -162,10 +162,11 @@ export class WorkspaceRuntime {
   }
 
   /**
-   * Resume or settle the runs a Durable Object restart interrupted.
+   * Resume or settle the runs a Durable Object restart interrupted, and
+   * call a backend's `onSettle` again for runs it hasn't taken yet.
    * Backends do this when they first connect, which the next runtime
    * call or `ready({ all: true })` triggers. Call this from an alarm to
-   * resume runs without waiting for one.
+   * do it without waiting for one.
    */
   async recover(): Promise<void> {
     for (const [id, backend] of this.#options.backends) {

@@ -6,6 +6,7 @@ import { createGitClient } from "../src/git/index";
 import type {
   WorkspaceExecutionMetadata,
   WorkspaceRuntimePendingCall,
+  WorkspaceRuntimeSettledExecution,
   WorkspaceRuntimeValue,
   WorkspaceStub,
 } from "../src/index";
@@ -75,6 +76,11 @@ function fakeContainerBackend(): WorkspaceBackend {
 const durableCalls = new Map<string, number>();
 // Each call onWait was told about.
 const waits: WorkspaceRuntimePendingCall[] = [];
+// Each run onSettle was told about, and how many times it was told.
+const settles: WorkspaceRuntimeSettledExecution[] = [];
+// Runs whose next onSettle call throws, as a hook that couldn't reach
+// its app would.
+const refuseSettle = new Set<string>();
 let gateOpen = false;
 // Named gates a run can wait on after the first, for a second restart.
 const opened = new Set<string>();
@@ -317,6 +323,10 @@ function codemodeBackend(
     maxStdioBytes: overrides.maxStdioBytes ?? 64,
     maxCapabilityBytes: 1024,
     onWait: (call) => void waits.push(call),
+    onSettle: (run) => {
+      if (refuseSettle.delete(run.id)) throw new Error("the app is away");
+      settles.push(run);
+    },
     maxConcurrentCapabilityCalls: 2,
     modules: {
       "math-kit": "export const double = (value) => value * 2;",
@@ -580,6 +590,14 @@ export class HostDO extends DurableObject<Env> {
 
   waits() {
     return waits;
+  }
+
+  settles(id: string) {
+    return settles.filter((run) => run.id === id);
+  }
+
+  refuseSettle(id: string) {
+    refuseSettle.add(id);
   }
 
   async respond(id: string, callId: string, value: WorkspaceRuntimeValue) {
@@ -901,6 +919,15 @@ export default class extends WorkerEntrypoint<Env> {
 
       if (url.pathname === "/interrupt-waits") {
         return Response.json(await stub.waits());
+      }
+
+      if (url.pathname === "/settles") {
+        return Response.json(await stub.settles(url.searchParams.get("id") ?? ""));
+      }
+
+      if (url.pathname === "/refuse-settle") {
+        await stub.refuseSettle(url.searchParams.get("id") ?? "");
+        return new Response(null, { status: 204 });
       }
 
       if (url.pathname === "/interrupt-pending") {

@@ -229,6 +229,25 @@ Once none of its calls are waiting, the run replays to the call and the function
 - `respond()` throws `ENOTWAITING` for a call that isn't waiting, such as one already answered, so answering twice changes nothing.
 - Every answer replays the run from the top.
 
+### Hearing how a run ended
+
+Whoever started a run can await its result, but a run that waits for a person can outlive them: an agent's tool call may have moved on, or a deploy may have ended the request that started it. To hear about every run when it ends, give the backend an `onSettle` function. Like waiting, it's experimental.
+
+```ts
+new CodemodeBackend({
+  loader: env.LOADER,
+  onInterrupt: "replay",
+  onSettle: async (run) => {
+    // run: { id, backend, status, exitCode, result?, metadata, stdout, stderr, settledAt }
+    await conversations.get(run.metadata.conversation).runEnded(run);
+  },
+});
+```
+
+`status` is `"completed"`, `"failed"` or `"cancelled"`, and `stdout` and `stderr` hold the last 16 KiB of each. The backend saves this in the same transaction that ends the run, and deletes it once `onSettle` returns. If `onSettle` throws, or the object restarts before it returns, the backend calls it again the next time it connects or `workspace.runtime.recover()` runs. So `onSettle` may hear about a run more than once, and should treat its `id` as the key. A quick hook that saves the run to the app's own storage, and acts on it from there, keeps the window for a repeat small.
+
+Nothing wakes a Durable Object after a deploy, so an app that relies on `onSettle` should call `recover()` from an alarm while it has runs it hasn't heard back from. The `exec` tool can return before a run ends, once it waits, and leave the app to pass the outcome on through `onSettle`: see [Detaching](./09_tool_interface.md#detaching).
+
 ### Limits
 
 - A run gets three attempts, counted again each time it journals a call, and has to finish within its original timeout, counted from when it first started.

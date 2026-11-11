@@ -114,6 +114,7 @@ export type {
   WorkspaceRuntimeOutputOptions,
   WorkspaceRuntimePendingCall,
   WorkspaceRuntimeResult,
+  WorkspaceRuntimeSettledExecution,
   WorkspaceRuntimeStatus,
   WorkspaceRuntimeTruncation,
   WorkspaceRuntimeValue,

@@ -368,6 +368,28 @@ export interface WorkspaceRuntimePendingCall {
   readonly metadata: WorkspaceExecutionMetadata;
 }
 
+/**
+ * How a run ended, as a backend's `onSettle` hears it. Experimental: it
+ * may change in any release.
+ */
+export interface WorkspaceRuntimeSettledExecution {
+  /** The execution that ended. */
+  readonly id: string;
+  readonly backend: string;
+  readonly status: "completed" | "failed" | "cancelled";
+  readonly exitCode: number;
+  /** What the run's default export returned, when it returned something. */
+  readonly result?: WorkspaceRuntimeValue;
+  /** The `metadata` the run was started with, or an empty object. */
+  readonly metadata: WorkspaceExecutionMetadata;
+  /** The last 16 KiB of the run's standard output. */
+  readonly stdout: string;
+  /** The last 16 KiB of the run's standard error. */
+  readonly stderr: string;
+  /** When the run ended, in milliseconds since the epoch. */
+  readonly settledAt: number;
+}
+
 export interface ModuleExecutionEnvelope {
   id: string;
   // Identity of the process-local backend runtime that owns this
@@ -395,8 +417,9 @@ export interface WorkspaceModuleBackendHandle {
   }): Promise<ModuleExecutionEnvelope>;
   killExec(input: { id: string; signal?: KillSignal; runtimeId?: string }): Promise<void>;
   disposeExec(input: { id: string; runtimeId?: string }): Promise<void>;
-  // Settle the runs a restart interrupted. A backend that recovers
-  // when it connects needs nothing more here.
+  // Settle the runs a restart interrupted, and hand on outcomes a
+  // settle hook hasn't taken yet. A backend that does this when it
+  // connects only needs to retry the hook here.
   recover?(): Promise<void>;
   // Calls waiting for an answer, and answering one.
   pending?(): Promise<Omit<WorkspaceRuntimePendingCall, "backend">[]>;

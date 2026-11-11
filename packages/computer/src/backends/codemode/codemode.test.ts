@@ -232,6 +232,75 @@ describe("CodemodeBackend", () => {
     expect(workerDisposals).toBe(1);
   });
 
+  it("hands onSettle each run's outcome, and keeps nothing once it returns", async () => {
+    const load = vi.fn<WorkspaceRuntimeLoader["load"]>(() => ({
+      getEntrypoint() {
+        return {
+          evaluate: (
+            _input: unknown,
+            host: {
+              assertResult(value: unknown): Promise<void>;
+              attachOutput(readable: ReadableStream<Uint8Array>): Promise<void>;
+            },
+          ) => evaluateResult(host, { answer: 42 }),
+        };
+      },
+    }));
+    const storage = new SQLiteTestStorage();
+    const settled: unknown[] = [];
+    const workspace = new Workspace({
+      storage,
+      backends: [
+        new CodemodeBackend({ loader: { load }, onSettle: (run) => void settled.push(run) }),
+      ],
+    });
+    await workspace.fs.mkdir("/workspace", { recursive: true });
+
+    const handle = await workspace.runtime.exec("export default null", { metadata: { who: "a" } });
+    await handle.result();
+    await vi.waitFor(() => expect(settled).toHaveLength(1));
+
+    expect(settled[0]).toMatchObject({
+      id: handle.id,
+      backend: "codemode",
+      status: "completed",
+      exitCode: 0,
+      result: { answer: 42 },
+      metadata: { who: "a" },
+    });
+    const db = new Database(storage);
+    await vi.waitFor(() =>
+      expect(db.scalar<number>("SELECT COUNT(*) FROM workspace_runtime_settled")).toBe(0),
+    );
+  });
+
+  it("keeps no outcomes when there is no onSettle to hand them to", async () => {
+    const load = vi.fn<WorkspaceRuntimeLoader["load"]>(() => ({
+      getEntrypoint() {
+        return {
+          evaluate: (
+            _input: unknown,
+            host: {
+              assertResult(value: unknown): Promise<void>;
+              attachOutput(readable: ReadableStream<Uint8Array>): Promise<void>;
+            },
+          ) => evaluateResult(host, null),
+        };
+      },
+    }));
+    const storage = new SQLiteTestStorage();
+    const workspace = new Workspace({
+      storage,
+      backends: [new CodemodeBackend({ loader: { load } })],
+    });
+    await workspace.fs.mkdir("/workspace", { recursive: true });
+
+    await (await workspace.runtime.exec("export default null")).result();
+
+    const db = new Database(storage);
+    expect(db.scalar<number>("SELECT COUNT(*) FROM workspace_runtime_settled")).toBe(0);
+  });
+
   it("migrates the legacy execution journal schema", async () => {
     const db = new Database(new SQLiteTestStorage());
     initializeSchema(db, () => 0);

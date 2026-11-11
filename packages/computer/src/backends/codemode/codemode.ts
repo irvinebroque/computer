@@ -29,6 +29,7 @@ import type {
   WorkspaceRuntimeInterruptPolicy,
   WorkspaceRuntimeLoader,
   WorkspaceRuntimePendingCall,
+  WorkspaceRuntimeSettledExecution,
   WorkspaceRuntimeValue,
 } from "../../runtime/types";
 import { WORKSPACE_ROOT } from "../../workspace-root";
@@ -142,6 +143,20 @@ export interface CodemodeBackendOptions {
    * change in any release.
    */
   onWait?: (call: WorkspaceRuntimePendingCall) => void | Promise<void>;
+  /**
+   * Called once a run ends, however it ends, with its status, exit code,
+   * result, metadata and the end of its output. Use it to hear about a
+   * run nobody is waiting on, such as one an agent left waiting for an
+   * approval, and to carry on from it.
+   *
+   * The backend saves the run's outcome in the same transaction that
+   * ends it, and deletes it once this returns. If this throws or the
+   * object restarts first, the backend calls it again when it next
+   * connects or when `runtime.recover()` runs, so it may hear about a
+   * run more than once: treat the run's `id` as the key. Experimental:
+   * it may change in any release.
+   */
+  onSettle?: (execution: WorkspaceRuntimeSettledExecution) => void | Promise<void>;
   /**
    * How often to schedule a timer while any execution is running, in
    * milliseconds. Set it to 0 to turn the timer off. Defaults to 60
@@ -466,6 +481,9 @@ class CodemodeBackendHandle implements WorkspaceModuleBackendHandle {
   readonly #running = new Map<string, number>();
   readonly #recoveryQueue: Array<() => void> = [];
   readonly #recovering = new Set<string>();
+  // Settled runs whose onSettle call is under way, so a second delivery
+  // pass leaves them alone.
+  readonly #delivering = new Set<string>();
   #keepAlive: ReturnType<typeof setInterval> | undefined;
   // Zero when the timer is off or can't keep this object in memory.
   readonly #keepAliveIntervalMs: number;
@@ -536,6 +554,9 @@ class CodemodeBackendHandle implements WorkspaceModuleBackendHandle {
       "INTEGER NOT NULL DEFAULT 0",
     );
     addColumnIfMissing(host, "workspace_runtime_executions", "finished_at", "INTEGER");
+    // The run's metadata, as JSON, so onSettle can report it for a run
+    // that saved no start to resume from.
+    addColumnIfMissing(host, "workspace_runtime_executions", "metadata", "TEXT");
     host.db.run(
       `UPDATE workspace_runtime_executions
        SET finished_at = ?
@@ -553,6 +574,15 @@ class CodemodeBackendHandle implements WorkspaceModuleBackendHandle {
       )
     `);
     createResumeTables(host.db);
+    // Runs that ended and that onSettle hasn't heard about yet.
+    host.db.run(`
+      CREATE TABLE IF NOT EXISTS workspace_runtime_settled (
+        backend TEXT NOT NULL,
+        execution_id TEXT NOT NULL,
+        data TEXT NOT NULL,
+        PRIMARY KEY (backend, execution_id)
+      )
+    `);
     this.#prune();
     const interrupted = host.db.all<{ id: string }>(
       `SELECT id FROM workspace_runtime_executions WHERE backend = ? AND status = 'running'`,
@@ -560,11 +590,73 @@ class CodemodeBackendHandle implements WorkspaceModuleBackendHandle {
     );
     for (const { id } of interrupted) this.#resumeInterrupted(id);
     this.#drainRecoveries();
+    void this.#deliverSettled();
   }
 
-  // Recovery runs when the backend connects, so there's nothing left to
-  // do by the time the runtime asks.
-  async recover(): Promise<void> {}
+  // Interrupted runs resume when the backend connects, so all that's
+  // left is telling onSettle about runs it hasn't heard about.
+  async recover(): Promise<void> {
+    await this.#deliverSettled();
+  }
+
+  // Call onSettle for every saved outcome it hasn't taken yet, and
+  // delete each one it takes. One it throws on stays for the next pass.
+  async #deliverSettled(): Promise<void> {
+    const { onSettle } = this.#options;
+    if (onSettle === undefined) return;
+    let rows: Array<{ execution_id: string; data: string }>;
+    try {
+      rows = this.#host.db.all<{ execution_id: string; data: string }>(
+        `SELECT execution_id, data FROM workspace_runtime_settled WHERE backend = ?`,
+        this.#backendId,
+      );
+    } catch {
+      return;
+    }
+    await Promise.all(
+      rows
+        .filter((row) => !this.#delivering.has(row.execution_id))
+        .map(async ({ execution_id: id, data }) => {
+          this.#delivering.add(id);
+          try {
+            // After the current call, so a slow hook can't hold up the
+            // run that just ended.
+            await Promise.resolve();
+            await onSettle(JSON.parse(data) as WorkspaceRuntimeSettledExecution);
+            this.#host.db.run(
+              `DELETE FROM workspace_runtime_settled WHERE backend = ? AND execution_id = ?`,
+              this.#backendId,
+              id,
+            );
+          } catch (error) {
+            console.error({ message: "onSettle failed", id, error: String(error) });
+          } finally {
+            this.#delivering.delete(id);
+          }
+        }),
+    );
+  }
+
+  // What onSettle hears about a run that ended with these events.
+  #settledExecution(
+    record: ExecutionRecord,
+    status: Exclude<ExecutionRecord["status"], "running">,
+    events: readonly WorkspaceRuntimeEvent[],
+  ): WorkspaceRuntimeSettledExecution {
+    const all = [...record.events, ...events];
+    const exit = all.filter((event) => event.name === "exit").at(-1);
+    return {
+      id: record.id,
+      backend: this.#backendId,
+      status,
+      exitCode: exit?.name === "exit" ? exit.code : 1,
+      ...(exit?.name === "exit" && exit.result !== undefined ? { result: exit.result } : {}),
+      metadata: this.#metadataOf(record.id),
+      stdout: outputTail(all, "stdout"),
+      stderr: outputTail(all, "stderr"),
+      settledAt: Date.now(),
+    };
+  }
 
   // Start a run the restart interrupted again, if it asked for that and
   // still can, or settle it as failed.
@@ -814,18 +906,27 @@ class CodemodeBackendHandle implements WorkspaceModuleBackendHandle {
     }));
   }
 
-  // A waiting run's metadata. Every running record is in memory with its
-  // execution, so the saved start is only read for a run that isn't.
+  // A run's metadata. A running record in memory has it with its
+  // execution. Otherwise it's read from the run's row, or, for a run
+  // saved before the row kept it, from its saved start.
   #metadataOf(id: string): WorkspaceExecutionMetadata {
     const known = this.#records.get(id)?.execution;
     if (known !== undefined) return known.metadata;
-    let saved: ReturnType<typeof loadResume>;
+    let metadata: Record<string, string> | undefined;
     try {
-      saved = loadResume(this.#host.db, this.#backendId, id);
+      const row = this.#host.db.one<{ metadata: string | null }>(
+        `SELECT metadata FROM workspace_runtime_executions WHERE backend = ? AND id = ?`,
+        this.#backendId,
+        id,
+      );
+      metadata =
+        typeof row?.metadata === "string"
+          ? (JSON.parse(row.metadata) as Record<string, string>)
+          : loadResume(this.#host.db, this.#backendId, id)?.start.metadata;
     } catch {
-      saved = undefined;
+      metadata = undefined;
     }
-    return this.#execution(id, saved?.start.metadata).metadata;
+    return this.#execution(id, metadata).metadata;
   }
 
   // What host module calls of a run are told about it, frozen so one
@@ -1048,11 +1149,12 @@ class CodemodeBackendHandle implements WorkspaceModuleBackendHandle {
       try {
         this.#host.db.run(
           `INSERT INTO workspace_runtime_executions
-             (backend, id, status, created_at, finished_at)
-           VALUES (?, ?, 'running', ?, NULL)`,
+             (backend, id, status, created_at, finished_at, metadata)
+           VALUES (?, ?, 'running', ?, NULL, ?)`,
           this.#backendId,
           id,
           Date.now(),
+          input.metadata === undefined ? null : JSON.stringify(input.metadata),
         );
       } catch (error) {
         const durable = this.#recordFor(id);
@@ -1582,8 +1684,23 @@ class CodemodeBackendHandle implements WorkspaceModuleBackendHandle {
     record.persistenceFailed = false;
     let settledStatus = status;
     let settledEvents = events;
+    // Read before the transaction clears the run's saved start, which is
+    // where a resumed run's metadata may come from.
+    const settled =
+      this.#options.onSettle === undefined
+        ? undefined
+        : this.#settledExecution(record, status, events);
     try {
       this.#host.db.transactionSync(() => {
+        if (settled !== undefined) {
+          this.#host.db.run(
+            `INSERT OR REPLACE INTO workspace_runtime_settled (backend, execution_id, data)
+             VALUES (?, ?, ?)`,
+            this.#backendId,
+            record.id,
+            JSON.stringify(settled),
+          );
+        }
         this.#host.db.run(
           `UPDATE workspace_runtime_executions
            SET status = ?, finished_at = ?
@@ -1625,6 +1742,7 @@ class CodemodeBackendHandle implements WorkspaceModuleBackendHandle {
       } catch {
         // Retention cleanup is retried on the next operation.
       }
+      if (settled !== undefined) void this.#deliverSettled();
     }
   }
 
@@ -2331,6 +2449,16 @@ function recordedOutput(
     offset += chunk.byteLength;
   }
   return bytes;
+}
+
+const SETTLED_OUTPUT_BYTES = 16 * 1024;
+
+// The end of one of a run's streams, as text, for onSettle.
+function outputTail(events: readonly WorkspaceRuntimeEvent[], name: "stdout" | "stderr"): string {
+  const bytes = recordedOutput(events, name);
+  return new TextDecoder().decode(
+    bytes.subarray(Math.max(0, bytes.byteLength - SETTLED_OUTPUT_BYTES)),
+  );
 }
 
 function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
