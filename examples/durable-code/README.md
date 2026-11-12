@@ -4,6 +4,9 @@ Capture generated JavaScript in an Artifact. In later sessions, search the
 library, read an earlier solution, and execute or adapt it through Code Mode.
 Computer saves that execution too.
 
+The example runs `pi-durable` on a plain Durable Object. `PiHarness` and
+`Lifecycle` provide session persistence and wake-up handling.
+
 ```mermaid
 flowchart LR
   T[Task] --> S[Search and read earlier code]
@@ -24,7 +27,20 @@ const workspace = new Workspace({
 
 await workspace.ready();
 await workspace.codeLibrary?.refresh(); // start of each turn
-const tools = createAITools({ workspace });
+const tools = createPiTools({ workspace });
+```
+
+Connect those tools to `pi-durable` with the example's
+[`workspaceExtension`](src/tools.ts) adapter. It passes the calling conversation's
+identity to capture and marks reads and searches as safe to replay.
+
+```ts
+const registry = createRegistry();
+registry.install(workspaceExtension(tools, sessionIdForConversation, CODE_LIBRARY_GUIDANCE));
+const harness = new PiHarness({
+  harness: ({ storage, context }) => Harness.open(storage, { models, registry }, context),
+});
+Lifecycle.install(this).use(harness); // inside the Durable Object
 ```
 
 The binding selects an Artifacts namespace. The repository name selects which
@@ -67,7 +83,7 @@ curl 'http://localhost:8787/run?repository=finance-code' \
   -d '{"sessionId":"alice","task":"Write and execute a self-contained module that sums input.amounts. Try [12, 8, 5]."}'
 ```
 
-Bob starts a fresh conversation and reuses it:
+Bob starts a fresh pi conversation and reuses it:
 
 ```sh
 curl 'http://localhost:8787/run?repository=finance-code' \
@@ -117,8 +133,9 @@ modules for reuse.
 ## Sharing and failures
 
 The example routes each repository to one durable host writer and serializes
-its turns. Other Workspaces can use `readOnly: true` and call `refresh()` at the
-start of each turn.
+its turns, including pending turns recovered after a restart. It restores the
+repository and tool context before pi resumes. Other Workspaces can use
+`readOnly: true` and call `refresh()` at the start of each turn.
 
 | Rule or event | Behavior |
 | --- | --- |
@@ -128,6 +145,7 @@ start of each turn.
 | Local storage | One repository identity per storage database. |
 | Source push fails | Execution does not start. |
 | Dispatch acknowledgement is lost | Status stays `started` until a terminal event is observed. |
+| Object restarts during `exec` | Pi reports the interrupted tool call; arbitrary code does not automatically replay. |
 | Outcome push fails | Return the execution result and retain the outcome locally for retry. |
 
 The application owns the Artifact's lifetime and retention through the
