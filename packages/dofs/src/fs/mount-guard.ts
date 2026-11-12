@@ -21,6 +21,12 @@ import type { Database } from "../storage";
 // "loaded, no read-only mounts registered". The two are not the
 // same: the empty case must skip the SQL lookup on every check.
 const cache = new WeakMap<Database, readonly string[]>();
+const writeAccess = new WeakMap<Database["sql"], (root: string) => boolean>();
+
+/** Host-only policy for a mount indexer's scoped writes. Ordinary callers stay guarded. */
+export function setMountWriteAccess(db: Database, allowed: (root: string) => boolean): void {
+  writeAccess.set(db.sql, allowed);
+}
 
 // Public so the workspace-side indexer can drop the cache after it
 // writes a new _vfs_mounts row. Tests also call it when they stage
@@ -67,6 +73,8 @@ export function assertNotReadOnly(db: Database, path: string): void {
   const roots = getReadOnlyMountRoots(db);
   if (roots.length === 0) return;
   for (const root of roots) {
+    if (writeAccess.get(db.sql)?.(root)) continue;
+
     if (overlapsRoot(path, root)) {
       throw createWorkspaceError("EROFS", `read-only mount at ${root}: cannot modify`, path);
     }
@@ -79,6 +87,8 @@ export function assertNotReadOnly(db: Database, path: string): void {
 export function assertNotInReadOnlyMount(db: Database, path: string): void {
   const roots = getReadOnlyMountRoots(db);
   for (const root of roots) {
+    if (writeAccess.get(db.sql)?.(root)) continue;
+
     if (isAtOrBelowRoot(path, root)) {
       throw createWorkspaceError("EROFS", `read-only mount at ${root}: cannot modify`, path);
     }
@@ -92,6 +102,8 @@ export function assertNotInReadOnlyMount(db: Database, path: string): void {
 export function readOnlyRootFor(db: Database, path: string): string | undefined {
   const roots = getReadOnlyMountRoots(db);
   for (const root of roots) {
+    if (writeAccess.get(db.sql)?.(root)) continue;
+
     if (overlapsRoot(path, root)) return root;
   }
   return undefined;

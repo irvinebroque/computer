@@ -39,6 +39,8 @@ import {
 } from "./artifacts/index";
 import type { AssetsClient } from "./assets/index";
 import type { BackendHandle, WorkspaceBackend } from "./backend";
+import { CodeLibrary, CODE_LIBRARY_ROOT, type CodeLibraryOptions } from "./code-library/library";
+import { GitCodeLibraryRepository } from "./code-library/repository";
 import { ExecutionRuntimeTracker, SqlExecutionRuntimeStore } from "./execution-runtime-tracker";
 import type { GitClient, GitClientFactory, GitIdentity } from "./git/index";
 import { MountIndex } from "./mounts/index";
@@ -170,6 +172,9 @@ export interface WorkspaceOptions {
     sessionId?: string | null;
   };
 
+  /** Automatically capture module executions in an application-selected Artifacts repository. */
+  codeLibrary?: CodeLibraryOptions;
+
   // How much command output a run's result keeps, and where the rest
   // goes. Output past the limits is cut to its last lines, like pi's
   // bash tool, and saved in full to a file under `dir`, newest `keep`
@@ -195,6 +200,7 @@ const DISABLED_GIT_CLIENT = new Proxy(
 ) as GitClient;
 
 export class Workspace {
+  readonly codeLibrary: CodeLibrary | undefined;
   readonly #db: Database;
   readonly #fs: WorkspaceFilesystem;
   /**
@@ -274,6 +280,50 @@ export class Workspace {
       : createDisabledArtifactsClient();
     this.#db = new Database(options.storage);
     initializeSchema(this.#db, this.#now);
+
+    if (options.codeLibrary) {
+      const libraryOptions = options.codeLibrary;
+
+      if (
+        !libraryOptions.repository.trim() ||
+        libraryOptions.repository !== libraryOptions.repository.trim()
+      )
+        throw new Error(
+          "codeLibrary.repository must be a non-empty repository name without surrounding whitespace",
+        );
+
+      this.#db.run(
+        "CREATE TABLE IF NOT EXISTS workspace_code_library_origin (id INTEGER PRIMARY KEY CHECK (id = 1), session_id TEXT NOT NULL)",
+      );
+      this.#db.run(
+        "INSERT OR IGNORE INTO workspace_code_library_origin VALUES (1, ?)",
+        crypto.randomUUID(),
+      );
+
+      const origin = this.#db.one<{ session_id: string }>(
+        "SELECT session_id FROM workspace_code_library_origin WHERE id = 1",
+      );
+
+      if (!origin) throw new Error("Code library origin was not initialized");
+
+      this.codeLibrary = new CodeLibrary(
+        new GitCodeLibraryRepository(
+          this.#db,
+          createArtifact(libraryOptions.binding),
+          libraryOptions.repository,
+          libraryOptions.readOnly ?? false,
+        ),
+        async () => {
+          this.#mountIndex.invalidate();
+          await this.ensureMountsIndexed();
+        },
+        {
+          sessionId: this.#sessionId || origin.session_id,
+          readOnly: libraryOptions.readOnly,
+        },
+      );
+    }
+
     this.#executionRuntimes = new ExecutionRuntimeTracker(
       1_024,
       new SqlExecutionRuntimeStore(this.#db),
@@ -304,7 +354,15 @@ export class Workspace {
     this.#observer = options.observer ?? noopObserver;
     this.#syncLogger =
       options.syncTelemetry ?? createSyncLogger({ enabled: options.syncTelemetryEnabled ?? false });
-    this.#mounts = buildMountRegistry(options.mounts, {
+
+    if (this.codeLibrary && options.mounts?.[CODE_LIBRARY_ROOT]) {
+      throw new Error(`codeLibrary reserves ${CODE_LIBRARY_ROOT}`);
+    }
+
+    const mounts = { ...options.mounts };
+
+    if (this.codeLibrary) mounts[CODE_LIBRARY_ROOT] = this.codeLibrary.mount();
+    this.#mounts = buildMountRegistry(mounts, {
       sessionId: options.sessionId,
       vfs: () => this.provider(),
     });
@@ -405,6 +463,7 @@ export class Workspace {
         backends: this.#registeredBackends,
         backendHandle: (id) => this.#backendHandleFor(id),
         resolveBackendId: (id) => this.#resolveBackendId(id) ?? "",
+        codeLibrary: this.codeLibrary,
         ...(this.#output === false
           ? {}
           : {

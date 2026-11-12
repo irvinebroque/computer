@@ -556,6 +556,55 @@ Artifacts also offers an argv CLI (`artifacts.cli({ argv })`), and when
 backend exposes an `artifacts` command. See
 [`docs/15_artifacts_interface.md`](../../docs/15_artifacts_interface.md).
 
+### Durable code libraries
+
+Give Workspace an Artifacts repository to automatically capture generated
+module source, purpose, execution identity, and observed outcome:
+
+```ts
+const workspace = new Workspace({
+  storage: ctx.storage,
+  sessionId,
+  backends: [new CodemodeBackend({ loader: env.LOADER })],
+  codeLibrary: { binding: env.ARTIFACTS, repository: "finance-code" },
+});
+await workspace.ready();
+await workspace.codeLibrary?.refresh(); // at the start of a turn
+const tools = createAITools({ workspace });
+```
+
+```mermaid
+flowchart LR
+  A[Task] --> B[Search and read saved code]
+  B --> C[Execute or adapt]
+  C -->|automatic capture| D[Artifact]
+  D -->|next session| B
+```
+
+Agents use ordinary file tools on the read-only mount:
+
+```text
+/workspace/.code-library/runs/<id>/code.js
+/workspace/.code-library/runs/<id>/metadata.json
+```
+
+| Choice | Behavior |
+| --- | --- |
+| Same binding and repository | Share code across sessions; the Artifact outlives them. |
+| Different repository names | Keep libraries separate. |
+| `readOnly: true` | Read an existing library using read tokens; no capture. |
+| `codeLibrary.refresh()` | Load the next committed snapshot and update the mount. |
+| `codeLibrary.list()` / `.read(id)` | Inspect metadata and source from the current snapshot. |
+
+Coordinate one writer per repository and keep one repository per local storage
+database. Conflicting pushes reject and retain local commits. The explicit
+library binding is not exposed through the shell's Artifacts command.
+
+Capture saves module source, excluding imported files, dependencies, inputs,
+and outputs. The application manages Artifact retention and lifetime.
+See [`examples/durable-code`](../../examples/durable-code) for the runnable
+learning loop, sharing rules, and failure behavior.
+
 ## Crossing the Worker → DO boundary
 
 The Durable Object owns the Workspace; a Worker reaches it through a
@@ -717,6 +766,8 @@ An adapter for the Cloudflare runtime lives at
   No container.
 - [`examples/codemode`](../../examples/codemode) — the
   same shape, running ECMAScript modules instead of shell commands.
+- [`examples/durable-code`](../../examples/durable-code) — capture generated
+  code in Artifacts, find it in later conversations, and execute or adapt it.
 - [`examples/container`](../../examples/container) — the container
   backend running `computerd`.
 - [`examples/container-legacy`](../../examples/container-legacy) — the

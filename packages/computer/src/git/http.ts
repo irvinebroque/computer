@@ -1,20 +1,11 @@
-/** Minimal isomorphic-git transport contract, kept off the public Fetch API. */
-export interface GitHttpRequest {
-  url: string;
-  method?: string;
-  headers?: Record<string, string>;
-  body?: Iterable<Uint8Array> | AsyncIterable<Uint8Array>;
-  signal?: AbortSignal;
-}
-
-export interface GitHttpClient {
-  request(request: GitHttpRequest): Promise<unknown>;
-}
+import type { GitHttpRequest, HttpClient } from "isomorphic-git";
 
 /** Bridge Git's iterable bodies to Fetch without buffering packfiles. */
-export function withFetch(fetcher: typeof globalThis.fetch): GitHttpClient {
+export function withFetch(fetcher: typeof globalThis.fetch) {
   return {
-    async request({ url, method = "GET", headers = {}, body, signal }) {
+    async request({ url, method = "GET", headers = {}, body, signal }: GitHttpRequest) {
+      if (signal !== undefined && !(signal instanceof AbortSignal))
+        throw new TypeError("Expected an AbortSignal for Git transport");
       const init: RequestInit & { duplex?: "half" } = { method, headers, signal };
       if (body !== undefined) {
         const iterator = (async function* () {
@@ -47,7 +38,7 @@ export function withFetch(fetcher: typeof globalThis.fetch): GitHttpClient {
         body: responseBytes(response.body),
       };
     },
-  };
+  } satisfies HttpClient;
 }
 
 async function* responseBytes(body: ReadableStream<Uint8Array> | null) {

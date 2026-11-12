@@ -174,6 +174,15 @@ async function ensureParentDir(ws: WorkspaceFileStoreLike, path: string): Promis
   const i = path.lastIndexOf("/");
   if (i <= 0) return;
   const parent = path.slice(0, i);
+
+  // An existing ancestor can contain a read-only mount. Creating it again
+  // would hit the subtree guard even though this write is outside that mount.
+  try {
+    if ((await ws.fs.stat(parent)).isDirectory) return;
+  } catch (error) {
+    if (!isEnoent(error)) throw error;
+  }
+
   await ws.fs.mkdir(parent, { recursive: true });
 }
 

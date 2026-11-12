@@ -7,9 +7,12 @@ import { stageBlob } from "../sync/blobs";
 import { link } from "./link";
 import { mkdir } from "./mkdir";
 import {
+  assertNotInReadOnlyMount,
   assertNotReadOnly,
   getReadOnlyMountRoots,
   invalidateReadOnlyMountCache,
+  readOnlyRootFor,
+  setMountWriteAccess,
 } from "./mount-guard";
 import { readRangeSync } from "./readFile";
 import { rename } from "./rename";
@@ -60,6 +63,29 @@ async function materialiseRootDir(db: Database, root: string, now: () => number)
 }
 
 describe("mount-guard helpers", () => {
+  it("limits host write access to its authorized mount without changing persisted modes", async () => {
+    await withDB(async (db) => {
+      mkdir(db, "/a", {}, Date.now);
+      mkdir(db, "/b", {}, Date.now);
+      stageMount(db, "/a", "read-only");
+      stageMount(db, "/b", "read-only");
+      let writable: string | undefined;
+      setMountWriteAccess(db, (root) => root === writable);
+      expect(() => assertNotReadOnly(db, "/a/file")).toThrow("read-only mount");
+      writable = "/a";
+      expect(getReadOnlyMountRoots(db)).toEqual(["/a", "/b"]);
+      expect(() => assertNotReadOnly(db, "/a/file")).not.toThrow();
+      expect(() => assertNotInReadOnlyMount(db, "/a/file")).not.toThrow();
+      expect(readOnlyRootFor(db, "/a/file")).toBeUndefined();
+      expect(() => assertNotReadOnly(db, "/b/file")).toThrow("read-only mount");
+      await writeFile(db, "/a/file", "indexed", {}, Date.now);
+      writable = undefined;
+      await expect(writeFile(db, "/a/file", "tampered", {}, Date.now)).rejects.toThrow(
+        "read-only mount",
+      );
+    });
+  });
+
   it("caches read-only roots per database and reloads after invalidation", async () => {
     await withDB(async (db) => {
       // Cold cache: empty list, no rows.
