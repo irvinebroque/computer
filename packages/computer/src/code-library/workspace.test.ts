@@ -6,7 +6,7 @@ import { Database } from "@cloudflare/dofs";
 import { SQLiteTestStorage } from "@cloudflare/dofs/testing";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { FakeArtifactsBinding } from "../../tests/utilities/fake-artifacts-binding";
-import type { WorkspaceModuleBackend } from "../runtime/types";
+import type { WorkspaceModuleBackend, WorkspaceRuntimeEvent } from "../runtime/types";
 import { createAITools } from "../tools/ai-sdk/index";
 import { WorkspaceFileStore } from "../tools/common/fs/store";
 import { Workspace } from "../workspace";
@@ -78,6 +78,22 @@ afterEach(() => {
 });
 
 function backend(calls: string[], exitCode = 0): WorkspaceModuleBackend {
+  const events = (id: string, after = 0) =>
+    new ReadableStream<WorkspaceRuntimeEvent>({
+      start(controller) {
+        if (after < 1)
+          controller.enqueue({
+            id,
+            seq: 1,
+            name: "stdout",
+            value: new TextEncoder().encode("output"),
+          });
+
+        if (after < 2) controller.enqueue({ id, seq: 2, name: "exit", code: exitCode, result: 42 });
+        controller.close();
+      },
+    });
+
   return {
     id: "codemode",
     type: "test-module",
@@ -91,22 +107,11 @@ function backend(calls: string[], exitCode = 0): WorkspaceModuleBackend {
 
           return {
             id,
-            events: new ReadableStream({
-              start(controller) {
-                controller.enqueue({
-                  id,
-                  seq: 1,
-                  name: "exit",
-                  code: exitCode,
-                  result: 42,
-                });
-                controller.close();
-              },
-            }),
+            events: events(id),
           };
         },
-        async getExec() {
-          throw new Error("not used");
+        async getExec({ id, after }) {
+          return { id, events: events(id, after) };
         },
         async killExec() {},
         async disposeExec() {},
@@ -132,6 +137,129 @@ function library(ws: Workspace) {
 }
 
 describe("Artifacts-backed code library", () => {
+  it("keeps the library read-only while another capture refreshes its files", async () => {
+    const ws = workspace(new SQLiteTestStorage(), new GitArtifacts(), []);
+    await ws.ready();
+    const mount = ws.mounts().get(CODE_LIBRARY_ROOT);
+
+    if (!mount) throw new Error("Expected a library mount");
+    const materialize = mount.materialize;
+    const entered = Promise.withResolvers<undefined>();
+    const release = Promise.withResolvers<undefined>();
+    mount.materialize = async (api) => {
+      entered.resolve(undefined);
+      await release.promise;
+      await materialize(api);
+    };
+
+    const capture = ws.runtime.exec("export default () => 42;");
+    await entered.promise;
+
+    try {
+      await expect(
+        ws.fs.writeFile(`${CODE_LIBRARY_ROOT}/unexpected.js`, "tampered"),
+      ).rejects.toThrow("read-only mount");
+    } finally {
+      release.resolve(undefined);
+      await (await capture).result();
+    }
+
+    await expect(ws.fs.stat(`${CODE_LIBRARY_ROOT}/unexpected.js`)).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+  });
+
+  it.each(["cancelled source", "partial replay"])(
+    "records the outcome when result() replays a %s",
+    async (kind) => {
+      const ws = workspace(new SQLiteTestStorage(), new GitArtifacts(), []);
+      const initial = await ws.runtime.exec("export default () => 42;", { id: "replay" });
+      await initial.cancel();
+      expect(library(ws).list()[0].status).toBe("started");
+
+      const handle =
+        kind === "partial replay" ? await ws.runtime.getExec(initial.id, { resume: 2 }) : initial;
+
+      expect((await handle.result()).exitCode).toBe(0);
+      expect(library(ws).list()[0].status).toBe("succeeded");
+    },
+  );
+
+  it("keeps an uncertain dispatch started until a terminal event is observed", async () => {
+    const module = backend([]);
+    const connect = module.connect;
+    module.connect = async (context) => {
+      const handle = await connect(context);
+
+      return {
+        ...handle,
+        async exec(input) {
+          await handle.exec(input);
+          throw new Error("Dispatch acknowledgement lost");
+        },
+      };
+    };
+
+    const ws = new Workspace({
+      storage: new SQLiteTestStorage(),
+      sessionId: "agent-one",
+      artifacts: { binding: new GitArtifacts() },
+      codeLibrary: true,
+      backends: [module],
+    });
+
+    await expect(ws.runtime.exec("export default () => 42;", { id: "uncertain" })).rejects.toThrow(
+      "acknowledgement lost",
+    );
+    expect(library(ws).list()[0].status).toBe("started");
+    expect((await (await ws.runtime.getExec("uncertain")).result()).exitCode).toBe(0);
+    expect(library(ws).list()[0].status).toBe("succeeded");
+  });
+
+  it("preserves completed results during an outcome publication outage and refreshes on retry", async () => {
+    const module = backend([]);
+    const connect = module.connect;
+    module.connect = async (context) => {
+      const handle = await connect(context);
+
+      return {
+        ...handle,
+        async exec(input) {
+          const envelope = await handle.exec(input);
+          offline = true;
+
+          return envelope;
+        },
+      };
+    };
+
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const ws = new Workspace({
+      storage: new SQLiteTestStorage(),
+      sessionId: "agent-one",
+      artifacts: { binding: new GitArtifacts() },
+      codeLibrary: true,
+      backends: [module],
+    });
+
+    const handle = await ws.runtime.exec("export default () => 42;", { id: "publication" });
+    expect(await handle.result()).toMatchObject({ exitCode: 0, value: 42 });
+    const run = library(ws).list()[0];
+    expect(run.status).toBe("started");
+    expect(errors).toHaveBeenCalledOnce();
+    offline = false;
+    await (await ws.runtime.getExec(handle.id)).result();
+    expect(library(ws).read(run.id).status).toBe("succeeded");
+
+    const metadata = await ws.fs.readFile(
+      `${CODE_LIBRARY_ROOT}/runs/${run.id}/metadata.json`,
+      "utf8",
+    );
+
+    expect(JSON.parse(metadata).status).toBe("succeeded");
+  });
+
   it("saves before dispatch, exposes a read-only library, and restores it from the remote artifact", async () => {
     const binding = new GitArtifacts();
     const calls: string[] = [];
@@ -225,7 +353,15 @@ describe("Artifacts-backed code library", () => {
     });
 
     await restored.ready();
-    const tool = createAITools({ workspace: restored }).saved_count_rows;
+
+    const tool = createAITools({
+      workspace: restored,
+      exec: {
+        output: { maxBytes: 32, maxLines: 2 },
+        metadata: ({ toolCallId }) => ({ conversationId: `conversation-for-${toolCallId}` }),
+      },
+    }).saved_count_rows;
+
     expect(
       createAITools({ workspace: restored, exec: { backends: { other: {} } } }).saved_count_rows,
     ).toBeUndefined();
@@ -235,9 +371,39 @@ describe("Artifacts-backed code library", () => {
     expect(
       await tool.execute({ input: '{"rows":[1,2]}' }, { toolCallId: "reviewed", messages: [] }),
     ).toBe(42);
-    expect(exec).toHaveBeenCalledWith(source, expect.objectContaining({ input: { rows: [1, 2] } }));
+    expect(exec).toHaveBeenCalledWith(
+      source,
+      expect.objectContaining({
+        input: { rows: [1, 2] },
+        output: { maxBytes: 32, maxLines: 2 },
+        metadata: {
+          conversationId: "conversation-for-reviewed",
+          toolCallId: "reviewed",
+          purpose: "Run reviewed tool count_rows",
+        },
+      }),
+    );
     expect(calls).toEqual([source]);
     expect(library(restored).list()).toHaveLength(2);
+  });
+
+  it("omits reviewed tools when their backend no longer accepts function input", async () => {
+    const binding = new GitArtifacts();
+    const ws = workspace(new SQLiteTestStorage(), binding, []);
+    await (await ws.runtime.exec("export default () => 42;")).result();
+    await library(ws).promote(library(ws).list()[0].id, "answer", "Return an answer");
+    const incompatible = { ...backend([]), callable: false };
+
+    const restored = new Workspace({
+      storage: new SQLiteTestStorage(),
+      sessionId: "agent-one",
+      artifacts: { binding },
+      codeLibrary: true,
+      backends: [incompatible],
+    });
+
+    await restored.ready();
+    expect(createAITools({ workspace: restored }).saved_answer).toBeUndefined();
   });
 
   it("requires a scoped artifact and leaves disabled workspaces alone", () => {

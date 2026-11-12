@@ -1,7 +1,7 @@
 import { tool, type ToolSet } from "ai";
 import { z } from "zod";
 import type { PromotedCode } from "../../code-library/library";
-import { type ExecToolOptions, jsonValueSchema } from "../common/exec";
+import { defineExec, type ExecToolOptions, jsonValueSchema } from "../common/exec";
 import { type CreateToolsOptions, resolveToolOptions } from "../common/options";
 import type { PublishWorkspaceLike } from "../common/publish";
 import {
@@ -64,8 +64,17 @@ export function createAITools(options: CreateAIToolsOptions): ToolSet {
   if (exec !== undefined) {
     tools.exec = createExecTool(exec);
 
+    const backends = exec.workspace.runtime.backends?.() ?? [];
+
     for (const saved of workspace.codeLibrary?.promoted() ?? []) {
       if (exec.backends && !Object.hasOwn(exec.backends, saved.backend)) continue;
+
+      if (
+        !backends.some(
+          ({ id, protocol, callable }) => id === saved.backend && protocol === "module" && callable,
+        )
+      )
+        continue;
       tools[`saved_${saved.name}`] = createSavedCodeTool(saved, exec);
     }
   }
@@ -78,7 +87,7 @@ export function createAITools(options: CreateAIToolsOptions): ToolSet {
 }
 
 function createSavedCodeTool(saved: PromotedCode, exec: ExecToolOptions) {
-  const runtime = exec.workspace.runtime;
+  const execution = defineExec(exec);
 
   return tool({
     description: saved.description,
@@ -93,32 +102,29 @@ function createSavedCodeTool(saved: PromotedCode, exec: ExecToolOptions) {
       abortSignal?.throwIfAborted();
       const input = z.record(z.string(), jsonValueSchema).parse(JSON.parse(encoded));
 
-      const metadata =
-        typeof exec.metadata === "function" ? exec.metadata({ toolCallId }) : exec.metadata;
+      let outcome;
 
-      const handle = await runtime.exec(saved.code, {
-        backend: saved.backend,
-        cwd: saved.cwd,
-        input,
-        encoding: "utf8",
-        metadata: { ...metadata, toolCallId, purpose: `Run reviewed tool ${saved.name}` },
-      });
-
-      const onAbort = () => void handle.kill?.().catch(() => undefined);
-
-      if (abortSignal?.aborted) onAbort();
-      else abortSignal?.addEventListener("abort", onAbort, { once: true });
-
-      try {
-        const result = await handle.result();
-
-        if (result.exitCode !== 0)
-          throw new Error(result.stderr || `Saved tool exited with code ${result.exitCode}`);
-
-        return result.value;
-      } finally {
-        abortSignal?.removeEventListener("abort", onAbort);
+      for await (const snapshot of execution.execute(
+        {
+          command: saved.code,
+          backend: saved.backend,
+          cwd: saved.cwd,
+          input,
+          purpose: `Run reviewed tool ${saved.name}`,
+        },
+        { toolCallId, abortSignal },
+      )) {
+        outcome = snapshot;
       }
+
+      if (!outcome) throw new Error("Saved tool returned no outcome");
+
+      if ("error" in outcome) throw new Error(outcome.error);
+
+      if (outcome.exitCode !== 0)
+        throw new Error(outcome.stderr || `Saved tool exited with code ${outcome.exitCode}`);
+
+      return outcome.result;
     },
   });
 }

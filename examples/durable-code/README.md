@@ -124,7 +124,9 @@ descriptions should explain the expected JSON input.
 The initial implementation makes a Git push for capture and another for the
 outcome. If capture cannot be pushed, execution does not start. If the process
 is interrupted or its terminal event is never consumed, the run remains
-`started`; reading its execution handle later can record the outcome. A
+`started`; reading its execution handle later can record the outcome. An
+outcome push failure is logged without hiding the execution's result. The local
+commit is retried on the next library mutation or terminal-event replay. A
 successful run means exit code zero, not a correctness or safety review.
 
 Use one Workspace writer per agent session. A rejected push stops the operation

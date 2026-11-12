@@ -89,7 +89,7 @@ own binding requirements — see [Choosing a backend](#choosing-a-backend).
 
 Optional peer dependencies, installed only if you use the matching
 feature: `just-bash` for `@cloudflare/computer/backends/worker-shell`,
-`zod` for every tools entry point and durable code libraries, `ai` for
+`zod` for every tools entry point, `ai` for
 `@cloudflare/computer/tools` and `@cloudflare/computer/tools/ai-sdk`, and
 `@platformatic/vfs` for the Node-side VFS provider. The pi and TanStack
 AI entry points need nothing beyond `zod`; your agent brings its own

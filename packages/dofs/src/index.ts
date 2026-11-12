@@ -21,6 +21,7 @@ export {
   getReadOnlyMountRoots,
   invalidateReadOnlyMountCache,
   readOnlyRootFor,
+  setMountWriteAccess,
 } from "./fs/mount-guard";
 export type { ReaddirOptions, WorkspaceDirentEntry, WorkspaceDirentResult } from "./fs/readdir";
 export type { ReadFileOptions } from "./fs/readFile";

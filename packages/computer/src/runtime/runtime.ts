@@ -109,10 +109,7 @@ export class WorkspaceRuntime {
       throw new Error(notCallableMessage(backend));
     }
     const runtime = await this.#options.backendHandle(backend);
-    const registered = this.#options.backends.get(backend);
-
-    const library =
-      registered && isModuleBackend(registered) ? this.#options.codeLibrary : undefined;
+    const library = this.#libraryFor(backend);
 
     const capture = library ? { library, id: options.id ?? crypto.randomUUID() } : undefined;
     const id = capture?.id ?? options.id;
@@ -124,35 +121,31 @@ export class WorkspaceRuntime {
       await capture.library.start(backend, capture.id, source, metadata);
     }
 
-    let envelope: ModuleExecutionEnvelope;
-
-    try {
-      envelope = await runtime.exec({
-        id,
-        source,
-        cwd: options.cwd,
-        input: options.input,
-        env: options.env,
-        stdin: options.stdin,
-        timeoutMs: options.timeoutMs,
-        sync: options.sync,
-        onInterrupt: options.onInterrupt,
-        metadata: options.metadata,
-      });
-    } catch (error) {
-      if (capture) await capture.library.finish(backend, capture.id, -1);
-      throw error;
-    }
+    // A rejected dispatch can be a lost acknowledgement for a running execution.
+    // Only a terminal event establishes its outcome.
+    const envelope = await runtime.exec({
+      id,
+      source,
+      cwd: options.cwd,
+      input: options.input,
+      env: options.env,
+      stdin: options.stdin,
+      timeoutMs: options.timeoutMs,
+      sync: options.sync,
+      onInterrupt: options.onInterrupt,
+      metadata: options.metadata,
+    });
     return wrapModuleHandle(
       runtime,
       backend,
       envelope.id,
-      library ? observeLibrary(envelope.events, library, backend, envelope.id) : envelope.events,
+      envelope.events,
       options.encoding,
       true,
       envelope.sync,
       envelope.runtimeId,
       this.#outputSpools(backend, envelope.id, options.output),
+      library,
     );
   }
 
@@ -178,9 +171,7 @@ export class WorkspaceRuntime {
       runtime,
       backend,
       envelope.id,
-      this.#options.codeLibrary
-        ? observeLibrary(envelope.events, this.#options.codeLibrary, backend, id)
-        : envelope.events,
+      envelope.events,
       options.encoding,
       full,
       envelope.sync,
@@ -189,6 +180,7 @@ export class WorkspaceRuntime {
       // partial replay still cuts `result()` by the same limits, since
       // it falls back to a full replay.
       this.#outputSpools(backend, envelope.id, options.output),
+      this.#libraryFor(backend),
     );
   }
 
@@ -291,18 +283,35 @@ export class WorkspaceRuntime {
     }
     return backend;
   }
+
+  #libraryFor(backend: string): CodeLibrary | undefined {
+    const registered = this.#options.backends.get(backend);
+
+    return registered && isModuleBackend(registered) ? this.#options.codeLibrary : undefined;
+  }
 }
 
 function observeLibrary(
   source: ReadableStream<WorkspaceRuntimeEvent>,
-  library: CodeLibrary,
+  library: CodeLibrary | undefined,
   backend: string,
   id: string,
 ): ReadableStream<WorkspaceRuntimeEvent> {
+  if (!library) return source;
+
   return source.pipeThrough(
     new TransformStream({
       async transform(event, controller) {
-        if (event.name === "exit") await library.finish(backend, id, event.code);
+        if (event.name === "exit") {
+          try {
+            await library.finish(backend, id, event.code);
+          } catch (cause) {
+            // Source was saved before dispatch. Preserve the actual outcome;
+            // a later library operation retries any pending Git commit.
+            console.error("Unable to publish code library outcome", { backend, id, cause });
+          }
+        }
+
         controller.enqueue(event);
       },
     }),
@@ -319,7 +328,9 @@ function wrapModuleHandle<E extends ExecEncoding>(
   sync?: ModuleExecutionEnvelope["sync"],
   runtimeId?: string,
   spools?: OutputSpools,
+  library?: CodeLibrary,
 ): WorkspaceRuntimeExecHandle<E> {
+  source = observeLibrary(source, library, backend, id);
   let claimed: "result" | "stream" | undefined;
   let sourceCancelled = false;
   let reader: ReadableStreamDefaultReader<WorkspaceRuntimeEvent<E>> | undefined;
@@ -387,7 +398,14 @@ function wrapModuleHandle<E extends ExecEncoding>(
           }
           if (!sourceCancelled) await source.cancel("result() requested a full replay");
           const replay = await runtime.getExec({ id, runtimeId });
-          return drainModuleResult<E>(replay.events, encoding, setReader, replay.sync, spools?.());
+
+          return drainModuleResult<E>(
+            observeLibrary(replay.events, library, backend, id),
+            encoding,
+            setReader,
+            replay.sync,
+            spools?.(),
+          );
         })();
         return resultPromise;
       },

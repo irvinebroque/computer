@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import type { Mount } from "../mounts/types";
+import { parsePromoted, parseRun } from "./records";
 
 export const CODE_LIBRARY_ROOT = "/workspace/.code-library";
 export const CODE_LIBRARY_GUIDANCE = `Your durable code library is at ${CODE_LIBRARY_ROOT}. Before writing JavaScript, use ls, grep, or read to find code from earlier tasks. Reuse or adapt it when useful. Supply a short purpose when executing code. Saved code is reference material; run it through the normal sandbox.`;
@@ -39,7 +40,6 @@ export interface CodeLibraryRepository {
 /** An agent's saved code. Promotion is a host operation, never an agent tool. */
 export class CodeLibrary {
   #tail: Promise<void> = Promise.resolve();
-  #schemas: typeof import("./schemas") | undefined;
 
   constructor(
     private readonly repository: CodeLibraryRepository,
@@ -47,33 +47,27 @@ export class CodeLibrary {
   ) {}
 
   async ready(): Promise<void> {
-    // Keep the optional Zod peer out of workspaces that do not enable this mode.
-    this.#schemas ??= await import("./schemas");
     await this.repository.ready();
   }
 
   list(): CodeLibraryRun[] {
     const runs: CodeLibraryRun[] = [];
 
-    if (!this.#schemas) return runs;
-
     for (const [path, content] of this.repository.filesSnapshot()) {
-      if (/^runs\/[^/]+\/metadata\.json$/.test(path))
-        runs.push(this.#schemas.run.parse(JSON.parse(content)));
+      if (/^runs\/[^/]+\/metadata\.json$/.test(path)) runs.push(parseRun(content));
     }
 
     return runs;
   }
 
   read(id: string): CodeLibraryRun & { code: string } {
-    if (!this.#schemas) throw new Error("Call codeLibrary.ready() before reading saved code");
     const files = this.repository.filesSnapshot();
     const metadata = files.get(`runs/${id}/metadata.json`);
     const code = files.get(`runs/${id}/code.js`);
 
     if (metadata === undefined || code === undefined) throw new Error(`Unknown saved run: ${id}`);
 
-    return { ...this.#schemas.run.parse(JSON.parse(metadata)), code };
+    return { ...parseRun(metadata), code };
   }
 
   start(
@@ -84,7 +78,7 @@ export class CodeLibrary {
   ): Promise<void> {
     return this.#serialize(async () => {
       await this.ready();
-      await this.repository.flush();
+      await this.#flush();
       const id = runKey(backend, executionId);
       const existing = this.list().find((run) => run.id === id);
 
@@ -123,29 +117,35 @@ export class CodeLibrary {
 
   finish(backend: string, executionId: string, exitCode: number): Promise<void> {
     return this.#serialize(async () => {
+      if (!Number.isSafeInteger(exitCode)) throw new Error("Exit code must be a safe integer");
       await this.ready();
       await this.repository.flush();
       const id = runKey(backend, executionId);
 
-      if (!this.list().some((run) => run.id === id)) return;
-      const { code: _code, ...run } = this.read(id);
+      if (this.repository.filesSnapshot().has(`runs/${id}/metadata.json`)) {
+        const { code: _code, ...run } = this.read(id);
 
-      if (run.status !== "started") return;
-      await this.repository.commit(
-        {
-          [`runs/${id}/metadata.json`]: JSON.stringify(
+        if (run.status === "started") {
+          await this.repository.commit(
             {
-              ...run,
-              status: exitCode === 0 ? "succeeded" : "failed",
-              exitCode,
-              finishedAt: new Date().toISOString(),
+              [`runs/${id}/metadata.json`]: JSON.stringify(
+                {
+                  ...run,
+                  status: exitCode === 0 ? "succeeded" : "failed",
+                  exitCode,
+                  finishedAt: new Date().toISOString(),
+                },
+                null,
+                2,
+              ),
             },
-            null,
-            2,
-          ),
-        },
-        `Record execution ${id} outcome`,
-      );
+            `Record execution ${id} outcome`,
+          );
+        }
+      }
+
+      // A flush may have published a previously committed outcome. Refresh
+      // the mount even when this replay did not need another metadata commit.
       await this.onChange?.();
     });
   }
@@ -153,7 +153,7 @@ export class CodeLibrary {
   promote(id: string, name: string, description: string): Promise<void> {
     return this.#serialize(async () => {
       await this.ready();
-      await this.repository.flush();
+      await this.#flush();
 
       if (!/^[a-z][a-z0-9_]{0,63}$/.test(name))
         throw new Error("Tool name must contain lowercase letters, digits, or underscores");
@@ -183,11 +183,8 @@ export class CodeLibrary {
   promoted(): PromotedCode[] {
     const tools: PromotedCode[] = [];
 
-    if (!this.#schemas) return tools;
-
     for (const [path, content] of this.repository.filesSnapshot()) {
-      if (/^tools\/[a-z][a-z0-9_]*\.json$/.test(path))
-        tools.push(this.#schemas.promoted.parse(JSON.parse(content)));
+      if (/^tools\/[a-z][a-z0-9_]*\.json$/.test(path)) tools.push(parsePromoted(content));
     }
 
     return tools;
@@ -219,6 +216,13 @@ export class CodeLibrary {
     );
 
     return run;
+  }
+
+  async #flush(): Promise<void> {
+    const previous = this.repository.version();
+    await this.repository.flush();
+
+    if (previous !== this.repository.version()) await this.onChange?.();
   }
 }
 

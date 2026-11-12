@@ -8,16 +8,13 @@
 // the subtree under the mount root and leave _vfs_mounts.indexed = 0
 // so the next pass retries from scratch.
 //
-// dofs's read-only mount guard reads _vfs_mounts.mode to reject
-// writes under registered read-only roots. The indexer must therefore
-// keep the row in 'read-write' while it materialises (otherwise its
-// own mkdir / writeFile calls hit the guard) and flip to the
-// registered mode only after materialize() succeeds. The cache in
-// @cloudflare/dofs is invalidated after every transition so the next
-// check picks up the new mode.
+// Keep read-only guards active throughout indexing. Only the async
+// context materializing a particular mount may write to that root.
+// Concurrent executions and sync pulls retain ordinary protections.
 
+import { AsyncLocalStorage } from "node:async_hooks";
 import type { Database, WorkspaceFilesystem } from "@cloudflare/dofs";
-import { invalidateReadOnlyMountCache, ROOT_INODE } from "@cloudflare/dofs";
+import { invalidateReadOnlyMountCache, ROOT_INODE, setMountWriteAccess } from "@cloudflare/dofs";
 
 import type { Mount, MountWriteAPI } from "./types";
 
@@ -27,6 +24,8 @@ export interface IndexerOptions {
   // The resolved registry keyed by absolute mount root.
   mounts: Map<string, Mount>;
 }
+
+const mountWrites = new AsyncLocalStorage<{ db: Database; root: string }>();
 
 // Materialize every registered mount whose _vfs_mounts row is not
 // yet marked indexed. Calls are deduped through the per-workspace
@@ -78,80 +77,76 @@ async function runIndex(opts: IndexerOptions): Promise<void> {
   }
 
   const results = await Promise.allSettled(
-    pending.map(async ([root, mount]) => {
-      // Record the mount as registered-but-not-indexed before we
-      // start writing into the subtree. mode='read-write' for the
-      // duration of materialize() so the indexer's own mkdir /
-      // writeFile calls bypass the dofs read-only guard; we flip
-      // to mount.mode at the end. If materialize() crashes the row
-      // stays with indexed=0 and the next pass retries from
-      // scratch.
-      db.run(
-        "INSERT INTO _vfs_mounts (root, kind, mode, indexed) VALUES (?, ?, 'read-write', 0)\n" +
-          "  ON CONFLICT(root) DO UPDATE SET kind = excluded.kind, mode = 'read-write', indexed = 0",
-        root,
-        mount.kind,
-      );
-      invalidateReadOnlyMountCache(db);
+    pending.map(([root, mount]) =>
+      mountWrites.run({ db, root }, async () => {
+        // Persist the real mode before yielding, including on failed materialization.
+        db.run(
+          "INSERT INTO _vfs_mounts (root, kind, mode, indexed) VALUES (?, ?, ?, 0)\n" +
+            "  ON CONFLICT(root) DO UPDATE SET kind = excluded.kind, mode = excluded.mode, indexed = 0",
+          root,
+          mount.kind,
+          mount.mode,
+        );
+        invalidateReadOnlyMountCache(db);
 
-      const api = createWriteAPI({ fs, root, mount });
-      try {
-        // Pre-create the mount root so an empty mount (one whose
-        // materialize() produces zero entries) still has a
-        // resolvable inode. Without this, only non-empty mounts get
-        // a root — as a side effect of the first writeFile's parent
-        // mkdir chain — and readdir(root) on an empty mount rejects
-        // with ENOENT. The mkdir is inside the try block so a crash
-        // mid-materialize rolls it back via the existing fs.rm path
-        // below.
-        //
-        // A mount owns its root outright, so whatever is there is
-        // removed first: files from a previous version, files a user
-        // created before the mount was registered, and the partial
-        // output of an interrupted run, whatever state that left the
-        // _vfs_mounts row in. Clearing on every pass is what keeps a
-        // retry from leaving stale files behind. The rm goes through
-        // the filesystem, so it is recorded as changes and reaches the
-        // container on the next push.
-        await clearRoot(fs, root);
-        // "/" always exists, and mkdir rejects it even with recursive.
-        if (root !== "/") await fs.mkdir(root, { recursive: true });
-        await mount.materialize(api);
-        // Stamp every node reachable from the mount root with
-        // mount_root = <root>. The dofs guard reads the path → root
-        // mapping from _vfs_mounts, but the provenance column also
-        // exists on vfs_nodes so downstream tools (sync drop
-        // reasoning, future write-back, GC of mount subtrees) can
-        // tell which mount owns which inode without re-resolving
-        // the path. Stamped inside the try block so the rollback
-        // path wipes the stamps along with the rows.
-        stampMountProvenance(db, root);
-      } catch (error) {
-        // Roll back anything the partial materialize landed under
-        // this mount's root. We use fs.rm with recursive+force so a
-        // half-created subtree leaves no orphan rows behind. The
-        // row is still mode='read-write' at this point, so the rm
-        // is not blocked by its own guard.
+        const api = createWriteAPI({ fs, root, mount });
         try {
+          // Pre-create the mount root so an empty mount (one whose
+          // materialize() produces zero entries) still has a
+          // resolvable inode. Without this, only non-empty mounts get
+          // a root — as a side effect of the first writeFile's parent
+          // mkdir chain — and readdir(root) on an empty mount rejects
+          // with ENOENT. The mkdir is inside the try block so a crash
+          // mid-materialize rolls it back via the existing fs.rm path
+          // below.
+          //
+          // A mount owns its root outright, so whatever is there is
+          // removed first: files from a previous version, files a user
+          // created before the mount was registered, and the partial
+          // output of an interrupted run, whatever state that left the
+          // _vfs_mounts row in. Clearing on every pass is what keeps a
+          // retry from leaving stale files behind. The rm goes through
+          // the filesystem, so it is recorded as changes and reaches the
+          // container on the next push.
           await clearRoot(fs, root);
-        } catch {
-          // Best effort. If the subtree doesn't exist we still want
-          // the original error to surface.
+          // "/" always exists, and mkdir rejects it even with recursive.
+
+          if (root !== "/") await fs.mkdir(root, { recursive: true });
+          await mount.materialize(api);
+          // Stamp every node reachable from the mount root with
+          // mount_root = <root>. The dofs guard reads the path → root
+          // mapping from _vfs_mounts, but the provenance column also
+          // exists on vfs_nodes so downstream tools (sync drop
+          // reasoning, future write-back, GC of mount subtrees) can
+          // tell which mount owns which inode without re-resolving
+          // the path. Stamped inside the try block so the rollback
+          // path wipes the stamps along with the rows.
+          stampMountProvenance(db, root);
+        } catch (error) {
+          // Roll back anything the partial materialize landed under
+          // this mount's root. We use fs.rm with recursive+force so a
+          // half-created subtree leaves no orphan rows behind. The
+          // indexer's scoped write access also permits this cleanup.
+          try {
+            await clearRoot(fs, root);
+          } catch {
+            // Best effort. If the subtree doesn't exist we still want
+            // the original error to surface.
+          }
+
+          throw error;
         }
-        throw error;
-      }
-      // Flip to the registered mode and mark indexed in a single
-      // UPDATE, then invalidate the guard cache so subsequent
-      // writes through Workspace.fs (and any pull) see the final
-      // mode.
-      db.run(
-        "UPDATE _vfs_mounts SET mode = ?, indexed = 1, version = ? WHERE root = ?",
-        mount.mode,
-        versions.get(root) ?? null,
-        root,
-      );
-      invalidateReadOnlyMountCache(db);
-    }),
+        // Publish the completed version while preserving the registered mode.
+
+        db.run(
+          "UPDATE _vfs_mounts SET mode = ?, indexed = 1, version = ? WHERE root = ?",
+          mount.mode,
+          versions.get(root) ?? null,
+          root,
+        );
+        invalidateReadOnlyMountCache(db);
+      }),
+    ),
   );
 
   const failures = [
@@ -354,6 +349,11 @@ export class MountIndex {
     this.#db = opts.db;
     this.#fs = opts.fs;
     this.#mounts = opts.mounts;
+    setMountWriteAccess(this.#db, (root) => {
+      const owner = mountWrites.getStore();
+
+      return owner?.db.sql === this.#db.sql && owner.root === root;
+    });
   }
 
   /** Recheck versions after a host-owned mount changes. */
