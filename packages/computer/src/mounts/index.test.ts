@@ -1,8 +1,10 @@
+import { Database } from "@cloudflare/dofs";
 import { SQLiteTestStorage } from "@cloudflare/dofs/testing";
 import { describe, expect, it, vi } from "vitest";
 
 import type { BackendHandle, WorkspaceBackend } from "../backend";
 import { Workspace } from "../workspace";
+import { MountIndex } from "./index";
 import type { EagerMount, MountWriteAPI } from "./types";
 
 function makeStorage(): SQLiteTestStorage {
@@ -600,6 +602,40 @@ describe("mount indexer", () => {
 });
 
 describe("mount versions", () => {
+  it("rechecks a version invalidated during materialization", async () => {
+    const storage = makeStorage();
+    const ws = new Workspace({ storage });
+    const entered = Promise.withResolvers<undefined>();
+    const unblock = Promise.withResolvers<undefined>();
+    let version = "one";
+    const mount: EagerMount = {
+      kind: "changing",
+      mode: "read-only",
+      strategy: "eager",
+      version: () => version,
+      async materialize(api) {
+        const content = version;
+        if (content === "one") {
+          entered.resolve(undefined);
+          await unblock.promise;
+        }
+        await api.writeFile(`${api.root}/version.txt`, streamOf(utf8(content)));
+      },
+    };
+    const index = new MountIndex({
+      db: new Database(storage),
+      fs: ws.fs,
+      mounts: new Map([["/changing", mount]]),
+    });
+    const indexing = index.ensureIndexed();
+    await entered.promise;
+    version = "two";
+    index.invalidate();
+    unblock.resolve(undefined);
+    await indexing;
+    expect(await ws.fs.readFile("/changing/version.txt", "utf8")).toBe("two");
+  });
+
   function bootWith(storage: SQLiteTestStorage, mount: EagerMount): Workspace {
     return new Workspace({ storage, backends, mounts: { "/workspace/m": mount } });
   }

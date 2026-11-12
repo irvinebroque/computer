@@ -146,8 +146,12 @@ export function createArtifact(binding: Artifacts, sessionId?: string | null): A
       // does have, returning the metadata by value). Reach `info()`
       // through a typed view until the published types are corrected.
       const view = handle as unknown as { info(): Promise<ArtifactsRepoInfo> };
-      const info = await view.info();
-      return repoInfo(info, name);
+      try {
+        const info = await view.info();
+        return repoInfo(info, name);
+      } finally {
+        (handle as unknown as Partial<Disposable>)[Symbol.dispose]?.();
+      }
     },
 
     async list() {
@@ -189,7 +193,11 @@ export function createArtifact(binding: Artifacts, sessionId?: string | null): A
 
     async createToken(name, tokenScope, ttl) {
       const handle = await binding.get(scopedName(scope, name));
-      return handle.createToken(tokenScope, ttl);
+      try {
+        return await handle.createToken(tokenScope, ttl);
+      } finally {
+        (handle as unknown as Partial<Disposable>)[Symbol.dispose]?.();
+      }
     },
 
     async listTokens(name) {

@@ -158,3 +158,10 @@ export { WorkspaceFileStore } from "./tools/common/fs/store";
 export type { FileStat, FileStore, MutableFileStore } from "./tools/common/fs/types";
 export { Workspace, type WorkspaceGitFactory, type WorkspaceOptions } from "./workspace";
 export { WORKSPACE_ROOT } from "./workspace-root";
+export {
+  CodeLibrary,
+  CODE_LIBRARY_ROOT,
+  CODE_LIBRARY_GUIDANCE,
+  type CodeLibraryRun,
+  type PromotedCode,
+} from "./code-library/library";

@@ -556,6 +556,35 @@ Artifacts also offers an argv CLI (`artifacts.cli({ argv })`), and when
 backend exposes an `artifacts` command. See
 [`docs/15_artifacts_interface.md`](../../docs/15_artifacts_interface.md).
 
+### Durable code libraries
+
+Set `codeLibrary: true` on a Workspace with a scoped Artifacts binding to save
+module executions automatically. Computer pushes source and a small metadata
+record before dispatch, then records the observed exit code. The agent can read
+and search earlier runs at the read-only `/workspace/.code-library` mount.
+
+```ts
+const workspace = new Workspace({
+  storage: ctx.storage,
+  sessionId: ctx.id.toString(),
+  artifacts: { binding: env.ARTIFACTS },
+  backends: [new CodemodeBackend({ loader: env.LOADER })],
+  codeLibrary: true,
+});
+await workspace.ready();
+const tools = createAITools({ workspace });
+```
+
+The exec tool adds a required `purpose` field when this mode is enabled. Host
+calls can set `metadata: { purpose, conversationId }` on `runtime.exec()`.
+`workspace.codeLibrary.list()` and `.read(id)` expose committed runs to the
+host. After human review, `.promote(id, name, description)` pins successful
+source as `saved_<name>` in subsequent AI SDK tool sets. Promotion is never
+offered as an agent tool.
+
+See [`examples/durable-code`](../../examples/durable-code) for the full example,
+including failure behavior and the source-only reuse contract.
+
 ## Crossing the Worker → DO boundary
 
 The Durable Object owns the Workspace; a Worker reaches it through a
@@ -717,6 +746,8 @@ An adapter for the Cloudflare runtime lives at
   No container.
 - [`examples/codemode`](../../examples/codemode) — the
   same shape, running ECMAScript modules instead of shell commands.
+- [`examples/durable-code`](../../examples/durable-code) — capture generated
+  code in Artifacts, find it in later conversations, and promote reviewed runs.
 - [`examples/container`](../../examples/container) — the container
   backend running `computerd`.
 - [`examples/container-legacy`](../../examples/container-legacy) — the

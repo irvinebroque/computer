@@ -1,5 +1,6 @@
 import type { SkippedEntry } from "@cloudflare/dofs";
 
+import type { CodeLibrary } from "../code-library/library";
 import type { ExecEncoding } from "../shell";
 import { type CommandOutputFiles, OutputSpool, type SpooledOutput } from "./output-spool";
 import { makeOutputLimits, type OutputLimits } from "./output-tail";
@@ -20,6 +21,7 @@ import {
 } from "./types";
 
 interface WorkspaceRuntimeRouterOptions {
+  codeLibrary?: CodeLibrary;
   // What each registered backend says about itself.
   backends: ReadonlyMap<string, WorkspaceRegisteredBackend>;
   backendHandle: (id: string) => Promise<WorkspaceModuleBackendHandle>;
@@ -62,6 +64,11 @@ export class WorkspaceRuntime {
     this.#options = options;
   }
 
+  /** Whether module executions are automatically saved for later reuse. */
+  get codeLibraryEnabled(): boolean {
+    return this.#options.codeLibrary !== undefined;
+  }
+
   // Whether the named backend accepts a structured `input` value and
   // returns a structured result. Consumers such as the exec tool ask
   // this to know whether a backend is callable without the caller
@@ -102,23 +109,39 @@ export class WorkspaceRuntime {
       throw new Error(notCallableMessage(backend));
     }
     const runtime = await this.#options.backendHandle(backend);
-    const envelope = await runtime.exec({
-      id: options.id,
-      source,
-      cwd: options.cwd,
-      input: options.input,
-      env: options.env,
-      stdin: options.stdin,
-      timeoutMs: options.timeoutMs,
-      sync: options.sync,
-      onInterrupt: options.onInterrupt,
-      metadata: options.metadata,
-    });
+    const registered = this.#options.backends.get(backend);
+    const library =
+      registered && isModuleBackend(registered) ? this.#options.codeLibrary : undefined;
+    const capture = library ? { library, id: options.id ?? crypto.randomUUID() } : undefined;
+    const id = capture?.id ?? options.id;
+    if (capture)
+      await capture.library.start(backend, capture.id, source, {
+        ...options.metadata,
+        ...(options.cwd ? { cwd: options.cwd } : {}),
+      });
+    let envelope: ModuleExecutionEnvelope;
+    try {
+      envelope = await runtime.exec({
+        id,
+        source,
+        cwd: options.cwd,
+        input: options.input,
+        env: options.env,
+        stdin: options.stdin,
+        timeoutMs: options.timeoutMs,
+        sync: options.sync,
+        onInterrupt: options.onInterrupt,
+        metadata: options.metadata,
+      });
+    } catch (error) {
+      if (capture) await capture.library.finish(backend, capture.id, -1);
+      throw error;
+    }
     return wrapModuleHandle(
       runtime,
       backend,
       envelope.id,
-      envelope.events,
+      library ? observeLibrary(envelope.events, library, backend, envelope.id) : envelope.events,
       options.encoding,
       true,
       envelope.sync,
@@ -149,7 +172,9 @@ export class WorkspaceRuntime {
       runtime,
       backend,
       envelope.id,
-      envelope.events,
+      this.#options.codeLibrary
+        ? observeLibrary(envelope.events, this.#options.codeLibrary, backend, id)
+        : envelope.events,
       options.encoding,
       full,
       envelope.sync,
@@ -260,6 +285,22 @@ export class WorkspaceRuntime {
     }
     return backend;
   }
+}
+
+function observeLibrary(
+  source: ReadableStream<WorkspaceRuntimeEvent>,
+  library: CodeLibrary,
+  backend: string,
+  id: string,
+): ReadableStream<WorkspaceRuntimeEvent> {
+  return source.pipeThrough(
+    new TransformStream({
+      async transform(event, controller) {
+        if (event.name === "exit") await library.finish(backend, id, event.code);
+        controller.enqueue(event);
+      },
+    }),
+  );
 }
 
 function wrapModuleHandle<E extends ExecEncoding>(

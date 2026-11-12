@@ -1,0 +1,25 @@
+{
+  "name": "@example/computer-durable-code",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "An agent that saves generated JavaScript to Artifacts and reuses reviewed code.",
+  "scripts": {
+    "dev": "cf dev",
+    "deploy": "cf deploy",
+    "typecheck": "tsc --noEmit",
+    "build:types": "cf workers types"
+  },
+  "dependencies": {
+    "@cloudflare/computer": "*",
+    "agents": "^0.29.0",
+    "ai": "^7.0.0",
+    "workers-ai-provider": "^4.0.0",
+    "zod": "^4.6.6"
+  },
+  "devDependencies": {
+    "cf": "^1.0.0-beta.17",
+    "typescript": "^6.0.3",
+    "wrangler": "^4.148.0"
+  }
+}

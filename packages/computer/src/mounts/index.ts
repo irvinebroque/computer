@@ -348,11 +348,18 @@ export class MountIndex {
   readonly #mounts: Map<string, Mount>;
   #inFlight: Promise<void> | undefined;
   #done = false;
+  #generation = 0;
 
   constructor(opts: IndexerOptions) {
     this.#db = opts.db;
     this.#fs = opts.fs;
     this.#mounts = opts.mounts;
+  }
+
+  /** Recheck versions after a host-owned mount changes. */
+  invalidate(): void {
+    this.#done = false;
+    this.#generation++;
   }
 
   ensureIndexed(): Promise<void> {
@@ -362,13 +369,15 @@ export class MountIndex {
       this.#done = true;
       return Promise.resolve();
     }
-    this.#inFlight = runIndex({ db: this.#db, fs: this.#fs, mounts: this.#mounts })
-      .then(() => {
-        this.#done = true;
-      })
-      .finally(() => {
-        this.#inFlight = undefined;
-      });
+    this.#inFlight = (async () => {
+      do {
+        const generation = this.#generation;
+        await runIndex({ db: this.#db, fs: this.#fs, mounts: this.#mounts });
+        this.#done = generation === this.#generation;
+      } while (!this.#done);
+    })().finally(() => {
+      this.#inFlight = undefined;
+    });
     return this.#inFlight;
   }
 }

@@ -17,7 +17,7 @@ import type { WorkspaceRuntimeTruncation, WorkspaceRuntimeValue } from "../../ru
 // and the generated JSON Schema describes a real shape (z.unknown()
 // serializes to an empty schema that some providers reject under
 // strict function calling).
-const jsonValueSchema: z.ZodType<WorkspaceRuntimeValue> = z.lazy(() =>
+export const jsonValueSchema: z.ZodType<WorkspaceRuntimeValue> = z.lazy(() =>
   z.union([
     z.string(),
     z.number(),
@@ -57,6 +57,7 @@ export interface ExecRuntimeHandle extends Partial<AsyncIterable<ExecStreamEvent
 
 export interface ExecWorkspaceLike {
   runtime: {
+    readonly codeLibraryEnabled?: boolean;
     exec(
       command: string,
       options: {
@@ -151,6 +152,7 @@ export type ExecToolOutput =
   | { command: string; cwd: string | null; backend: string; error: string };
 
 export interface ExecInput {
+  purpose?: string;
   command: string;
   cwd?: string;
   backend?: string;
@@ -211,7 +213,11 @@ export function defineExec(options: ExecToolOptions): ExecDefinition {
     return { id, text, callable };
   });
   const callableBackendIds = new Set(backends.filter((b) => b.callable).map((b) => b.id));
-  const description = describeTool(backends, limits);
+  const description =
+    describeTool(backends, limits) +
+    (runtime.codeLibraryEnabled
+      ? "\n\nYour saved code is in /workspace/.code-library. Use ls, grep, and read to check it before writing new code. Provide a short purpose for each execution."
+      : "");
   // Offer only the fields that can work: `backend` when there is a
   // choice, `input` when some backend accepts it.
   const shape: Record<string, z.ZodType> = {
@@ -224,6 +230,12 @@ export function defineExec(options: ExecToolOptions): ExecDefinition {
         "Environment variables for this run only. Values override the base environment without affecting later runs.",
       ),
   };
+  if (runtime.codeLibraryEnabled)
+    shape.purpose = z
+      .string()
+      .min(1)
+      .max(500)
+      .describe("Briefly describe what this code is intended to do.");
   if (!single) {
     shape.backend = z
       // SAFETY: defineExec checked that backendIds has at least one entry.
@@ -249,7 +261,7 @@ export function defineExec(options: ExecToolOptions): ExecDefinition {
     description,
     inputSchema,
     prepareArguments: callableBackendIds.size > 0 ? parseInputObject : (args) => args,
-    execute: async function* ({ command, cwd, backend, env, input }, context = {}) {
+    execute: async function* ({ command, cwd, backend, env, input, purpose }, context = {}) {
       const { abortSignal } = context;
       // With one backend there is nothing to choose. With several the
       // schema requires `backend`; a caller that skips the schema gets
@@ -277,7 +289,17 @@ export function defineExec(options: ExecToolOptions): ExecDefinition {
           backend: selectedBackend,
           env,
           input,
-          ...(metadata === undefined ? {} : { metadata }),
+          ...(metadata === undefined && purpose === undefined && !runtime.codeLibraryEnabled
+            ? {}
+            : {
+                metadata: {
+                  ...metadata,
+                  ...(purpose === undefined ? {} : { purpose }),
+                  ...(runtime.codeLibraryEnabled && context.toolCallId
+                    ? { toolCallId: context.toolCallId }
+                    : {}),
+                },
+              }),
           // The runtime cuts and saves by the same limits the tool
           // shows, so whatever the model does not see is in the file.
           output: limits,
