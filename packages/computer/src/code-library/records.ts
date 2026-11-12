@@ -1,5 +1,5 @@
 import type { WorkspaceRuntimeValue } from "../runtime/types";
-import type { CodeLibraryRun, PromotedCode } from "./library";
+import type { CodeLibraryRun } from "./library";
 
 type SavedRecord = { [field: string]: WorkspaceRuntimeValue };
 
@@ -44,28 +44,6 @@ export function parseRun(text: string): CodeLibraryRun {
     cwd: optionalString(record, "cwd"),
     finishedAt,
     exitCode,
-  };
-}
-
-export function parsePromoted(text: string): PromotedCode {
-  const record = parseRecord(text);
-  const name = stringField(record, "name");
-  const description = stringField(record, "description").trim();
-  const approvedAt = optionalString(record, "approvedAt");
-
-  if (approvedAt !== undefined) validateTime(approvedAt);
-
-  if (!/^[a-z][a-z0-9_]{0,63}$/.test(name) || !description)
-    throw new Error("Invalid input: code library tool needs a valid name and description");
-
-  return {
-    name,
-    description,
-    runId: runId(record, "runId"),
-    backend: stringField(record, "backend"),
-    code: stringField(record, "code"),
-    approvedAt,
-    cwd: optionalString(record, "cwd"),
   };
 }
 

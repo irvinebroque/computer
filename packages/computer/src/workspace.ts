@@ -172,8 +172,8 @@ export interface WorkspaceOptions {
     sessionId?: string | null;
   };
 
-  /** Select a code repository independently of the session. `true` uses the session-scoped artifacts client. */
-  codeLibrary?: boolean | CodeLibraryOptions;
+  /** Automatically capture module executions in an application-selected Artifacts repository. */
+  codeLibrary?: CodeLibraryOptions;
 
   // How much command output a run's result keeps, and where the rest
   // goes. Output past the limits is cut to its last lines, like pi's
@@ -282,25 +282,15 @@ export class Workspace {
     initializeSchema(this.#db, this.#now);
 
     if (options.codeLibrary) {
-      const selection = options.codeLibrary;
-
-      if (selection === true && (!options.artifacts || !this.#artifacts.sessionId)) {
-        throw new Error("codeLibrary requires an Artifacts binding and a non-empty sessionId");
-      }
-
-      const libraryOptions = selection === true ? undefined : selection;
+      const libraryOptions = options.codeLibrary;
 
       if (
-        libraryOptions &&
-        (!libraryOptions.repository.trim() ||
-          libraryOptions.repository !== libraryOptions.repository.trim())
+        !libraryOptions.repository.trim() ||
+        libraryOptions.repository !== libraryOptions.repository.trim()
       )
         throw new Error(
           "codeLibrary.repository must be a non-empty repository name without surrounding whitespace",
         );
-
-      if (libraryOptions?.readOnly && libraryOptions.capture === true)
-        throw new Error("A read-only code library cannot capture executions");
 
       this.#db.run(
         "CREATE TABLE IF NOT EXISTS workspace_code_library_origin (id INTEGER PRIMARY KEY CHECK (id = 1), session_id TEXT NOT NULL)",
@@ -319,19 +309,17 @@ export class Workspace {
       this.codeLibrary = new CodeLibrary(
         new GitCodeLibraryRepository(
           this.#db,
-          libraryOptions ? createArtifact(libraryOptions.binding) : this.#artifacts,
-          libraryOptions?.repository ?? "code-library",
-          libraryOptions?.readOnly ?? false,
+          createArtifact(libraryOptions.binding),
+          libraryOptions.repository,
+          libraryOptions.readOnly ?? false,
         ),
         async () => {
           this.#mountIndex.invalidate();
           await this.ensureMountsIndexed();
         },
         {
-          // Preserve the original key format for the per-agent convenience mode.
-          sessionId: libraryOptions ? this.#sessionId || origin.session_id : undefined,
-          readOnly: libraryOptions?.readOnly,
-          capture: libraryOptions?.capture,
+          sessionId: this.#sessionId || origin.session_id,
+          readOnly: libraryOptions.readOnly,
         },
       );
     }

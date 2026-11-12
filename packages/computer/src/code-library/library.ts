@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import type { Mount } from "../mounts/types";
-import { parsePromoted, parseRun } from "./records";
+import { parseRun } from "./records";
 
 export const CODE_LIBRARY_ROOT = "/workspace/.code-library";
 export const CODE_LIBRARY_GUIDANCE = `Your durable code library is at ${CODE_LIBRARY_ROOT}. Before writing JavaScript, use ls, grep, or read to find code from earlier tasks. Reuse or adapt it when useful. Supply a short purpose when executing code. Saved code is reference material; run it through the normal sandbox.`;
@@ -12,8 +12,6 @@ export interface CodeLibraryOptions {
   repository: string;
   /** Fetch existing code without creating repos, minting write tokens, or capturing executions. */
   readOnly?: boolean;
-  /** Capture module executions automatically. Defaults to true for writers, false for readers. */
-  capture?: boolean;
 }
 
 export interface CodeLibraryRun {
@@ -32,28 +30,17 @@ export interface CodeLibraryRun {
   exitCode?: number;
 }
 
-export interface PromotedCode {
-  name: string;
-  description: string;
-  runId: string;
-  backend: string;
-  code: string;
-  cwd?: string;
-  /** Host approval time. Absent only for records created by older versions. */
-  approvedAt?: string;
-}
-
 /** Internal repository seam; production uses GitCodeLibraryRepository. */
 export interface CodeLibraryRepository {
   ready(): Promise<void>;
   version(): string;
   filesSnapshot(): Map<string, string>;
-  commit(files: Record<string, string | null>, message: string): Promise<string>;
+  commit(files: Record<string, string>, message: string): Promise<string>;
   flush(): Promise<void>;
   refresh(): Promise<void>;
 }
 
-/** A repository's saved code. Promotion and retention are host operations. */
+/** Generated source and execution context in an application-selected repository. */
 export class CodeLibrary {
   #tail: Promise<void> = Promise.resolve();
   /** Whether the runtime automatically saves module executions to this library. */
@@ -62,9 +49,9 @@ export class CodeLibrary {
   constructor(
     private readonly repository: CodeLibraryRepository,
     private readonly onChange?: () => Promise<void>,
-    private readonly options: { sessionId?: string; readOnly?: boolean; capture?: boolean } = {},
+    private readonly options: { sessionId?: string; readOnly?: boolean } = {},
   ) {
-    this.captureEnabled = options.capture ?? !options.readOnly;
+    this.captureEnabled = !options.readOnly;
   }
 
   /** Load the initial committed snapshot. Repeated calls do not poll the remote. */
@@ -190,87 +177,6 @@ export class CodeLibrary {
 
       // A flush may have published a previously committed outcome. Refresh
       // the mount even when this replay did not need another metadata commit.
-      await this.onChange?.();
-    });
-  }
-
-  /** Host approval: pin successful source. Register it separately with savedCodeTools. */
-  promote(id: string, name: string, description: string): Promise<void> {
-    return this.#serialize(async () => {
-      this.#assertWritable();
-      await this.ready();
-      await this.#synchronize();
-
-      if (!/^[a-z][a-z0-9_]{0,63}$/.test(name))
-        throw new Error("Tool name must contain lowercase letters, digits, or underscores");
-
-      if (!description.trim()) throw new Error("Tool description is required");
-      const run = this.read(id);
-
-      if (run.status !== "succeeded") throw new Error("Only successful runs can be promoted");
-
-      const promoted: PromotedCode = {
-        name,
-        description,
-        runId: id,
-        backend: run.backend,
-        code: run.code,
-        approvedAt: new Date().toISOString(),
-      };
-
-      if (run.cwd) promoted.cwd = run.cwd;
-      await this.repository.commit(
-        { [`tools/${name}.json`]: JSON.stringify(promoted, null, 2) },
-        `Promote ${name}`,
-      );
-      await this.onChange?.();
-    });
-  }
-
-  /** Read reviewed tools from the current snapshot. */
-  promoted(): PromotedCode[] {
-    const tools: PromotedCode[] = [];
-
-    for (const [path, content] of this.repository.filesSnapshot()) {
-      if (/^tools\/[a-z][a-z0-9_]*\.json$/.test(path)) tools.push(parsePromoted(content));
-    }
-
-    return tools;
-  }
-
-  /** Remove a reviewed tool from the next tool set. Does not erase Git history. */
-  unpromote(name: string): Promise<void> {
-    return this.#serialize(async () => {
-      this.#assertWritable();
-      await this.ready();
-      await this.#synchronize();
-
-      if (!this.promoted().some((tool) => tool.name === name)) return;
-      await this.repository.commit(
-        { [`tools/${name}.json`]: null },
-        `Remove reviewed tool ${name}`,
-      );
-      await this.onChange?.();
-    });
-  }
-
-  /** Remove an unpromoted run from the current tree. Historical commits retain it. */
-  deleteRun(id: string): Promise<void> {
-    return this.#serialize(async () => {
-      this.#assertWritable();
-      await this.ready();
-      await this.#synchronize();
-      this.read(id);
-
-      if (this.promoted().some((tool) => tool.runId === id))
-        throw new Error("Remove the promoted tool before deleting its run");
-      await this.repository.commit(
-        {
-          [`runs/${id}/code.js`]: null,
-          [`runs/${id}/metadata.json`]: null,
-        },
-        `Remove execution ${id}`,
-      );
       await this.onChange?.();
     });
   }

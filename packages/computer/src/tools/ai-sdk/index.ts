@@ -1,7 +1,4 @@
-import { tool, type ToolSet } from "ai";
-import { z } from "zod";
-import type { PromotedCode } from "../../code-library/library";
-import { defineExec, type ExecToolOptions, jsonValueSchema } from "../common/exec";
+import type { ToolSet } from "ai";
 import { type CreateToolsOptions, resolveToolOptions } from "../common/options";
 import type { PublishWorkspaceLike } from "../common/publish";
 import {
@@ -19,10 +16,7 @@ import {
 export { forAISDKTools } from "./bindings";
 
 /** Options for {@link createAITools}. */
-export type CreateAIToolsOptions = CreateToolsOptions & {
-  /** Register the host-reviewed saved tools from the current library snapshot. Defaults to false. */
-  savedCodeTools?: boolean;
-};
+export type CreateAIToolsOptions = CreateToolsOptions;
 
 export {
   createDeleteTool,
@@ -62,24 +56,8 @@ export function createAITools(options: CreateAIToolsOptions): ToolSet {
   tools.edit = createEditTool(resolved.edit);
   tools.delete = createDeleteTool(resolved.delete);
 
-  const exec = resolved.exec;
-
-  if (exec !== undefined) {
-    tools.exec = createExecTool(exec);
-
-    const backends = exec.workspace.runtime.backends?.() ?? [];
-
-    for (const saved of options.savedCodeTools ? (workspace.codeLibrary?.promoted() ?? []) : []) {
-      if (exec.backends && !Object.hasOwn(exec.backends, saved.backend)) continue;
-
-      if (
-        !backends.some(
-          ({ id, protocol, callable }) => id === saved.backend && protocol === "module" && callable,
-        )
-      )
-        continue;
-      tools[`saved_${saved.name}`] = createSavedCodeTool(saved, exec);
-    }
+  if (resolved.exec !== undefined) {
+    tools.exec = createExecTool(resolved.exec);
   }
 
   if (resolved.publish) {
@@ -87,47 +65,4 @@ export function createAITools(options: CreateAIToolsOptions): ToolSet {
   }
 
   return tools;
-}
-
-function createSavedCodeTool(saved: PromotedCode, exec: ExecToolOptions) {
-  const execution = defineExec(exec);
-
-  return tool({
-    description: saved.description,
-    inputSchema: z.object({
-      input: z
-        .string()
-        .describe(
-          "JSON-encoded object passed to the reviewed function. Preserve JSON value types, including arrays and numbers.",
-        ),
-    }),
-    execute: async ({ input: encoded }, { toolCallId, abortSignal }) => {
-      abortSignal?.throwIfAborted();
-      const input = z.record(z.string(), jsonValueSchema).parse(JSON.parse(encoded));
-
-      let outcome;
-
-      for await (const snapshot of execution.execute(
-        {
-          command: saved.code,
-          backend: saved.backend,
-          cwd: saved.cwd,
-          input,
-          purpose: `Run reviewed tool ${saved.name}`,
-        },
-        { toolCallId, abortSignal },
-      )) {
-        outcome = snapshot;
-      }
-
-      if (!outcome) throw new Error("Saved tool returned no outcome");
-
-      if ("error" in outcome) throw new Error(outcome.error);
-
-      if (outcome.exitCode !== 0)
-        throw new Error(outcome.stderr || `Saved tool exited with code ${outcome.exitCode}`);
-
-      return outcome.result;
-    },
-  });
 }

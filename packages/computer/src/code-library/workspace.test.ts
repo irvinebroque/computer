@@ -125,8 +125,7 @@ function workspace(storage: SQLiteTestStorage, binding: Artifacts, calls: string
   return new Workspace({
     storage,
     sessionId: "agent-one",
-    artifacts: { binding },
-    codeLibrary: true,
+    codeLibrary: { binding, repository: "agent-one__code-library" },
     backends: [backend(calls, exitCode)],
   });
 }
@@ -208,19 +207,6 @@ describe("Artifacts-backed code library", () => {
         .list()
         .every((run) => run.status === "succeeded"),
     ).toBe(true);
-  });
-
-  it("keeps capture optional even for an application-owned writer", async () => {
-    const ws = new Workspace({
-      storage: new SQLiteTestStorage(),
-      codeLibrary: { binding: new GitArtifacts(), repository: "reference-code", capture: false },
-      backends: [backend([])],
-    });
-
-    await ws.ready();
-    await (await ws.runtime.exec("export default () => 42;")).result();
-    expect(library(ws).list()).toEqual([]);
-    expect(ws.runtime.codeLibraryEnabled).toBe(false);
   });
 
   it("does not create a missing read-only library", async () => {
@@ -332,13 +318,56 @@ describe("Artifacts-backed code library", () => {
     );
     await (await reader.runtime.exec(library(reader).read(run.id).code)).result();
     expect(library(reader).list()).toHaveLength(1);
-    await expect(library(reader).promote(run.id, "answer", "Answer")).rejects.toThrow("read-only");
-    await library(writer).deleteRun(run.id);
-    await library(reader).refresh();
-    expect(library(reader).list()).toEqual([]);
-    await expect(
-      reader.fs.stat(`${CODE_LIBRARY_ROOT}/runs/${run.id}/code.js`),
-    ).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("finds saved source in another session, executes it, and captures that execution", async () => {
+    const binding = new GitArtifacts();
+
+    const first = new Workspace({
+      storage: new SQLiteTestStorage(),
+      sessionId: "alice",
+      codeLibrary: { binding, repository: "finance-code" },
+      backends: [backend([])],
+    });
+
+    const source = "export default ({ rows }) => rows.length;";
+    await (await first.runtime.exec(source, { metadata: { purpose: "Count rows" } })).result();
+    const original = library(first).list()[0];
+    const calls: string[] = [];
+
+    const second = new Workspace({
+      storage: new SQLiteTestStorage(),
+      sessionId: "bob",
+      codeLibrary: { binding, repository: "finance-code" },
+      backends: [backend(calls)],
+    });
+
+    await second.ready();
+    expect(await second.fs.grep("rows.length", CODE_LIBRARY_ROOT)).toHaveLength(1);
+
+    const saved = await second.fs.readFile(
+      `${CODE_LIBRARY_ROOT}/runs/${original.id}/code.js`,
+      "utf8",
+    );
+
+    await (
+      await second.runtime.exec(saved, {
+        input: { rows: [1, 2, 3] },
+        metadata: { purpose: "Reuse the row counter" },
+      })
+    ).result();
+    expect(calls).toEqual([source]);
+    expect(library(second).list()).toHaveLength(2);
+    expect(library(second).list()).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ sessionId: "alice", status: "succeeded" }),
+        expect.objectContaining({
+          sessionId: "bob",
+          purpose: "Reuse the row counter",
+          status: "succeeded",
+        }),
+      ]),
+    );
   });
 
   it("refreshes a warm reader only at the host's chosen boundary", async () => {
@@ -424,14 +453,6 @@ describe("Artifacts-backed code library", () => {
     expect(library(other).list()).toEqual([]);
   });
 
-  it("requires explicit opt-in to register reviewed tools", async () => {
-    const ws = workspace(new SQLiteTestStorage(), new GitArtifacts(), []);
-    await (await ws.runtime.exec("export default () => 42;")).result();
-    await library(ws).promote(library(ws).list()[0].id, "answer", "Return an answer");
-    expect(createAITools({ workspace: ws }).saved_answer).toBeUndefined();
-    expect(createAITools({ workspace: ws, savedCodeTools: true }).saved_answer).toBeDefined();
-  });
-
   it("keeps the library read-only while another capture refreshes its files", async () => {
     const ws = workspace(new SQLiteTestStorage(), new GitArtifacts(), []);
     await ws.ready();
@@ -498,8 +519,7 @@ describe("Artifacts-backed code library", () => {
     const ws = new Workspace({
       storage: new SQLiteTestStorage(),
       sessionId: "agent-one",
-      artifacts: { binding: new GitArtifacts() },
-      codeLibrary: true,
+      codeLibrary: { binding: new GitArtifacts(), repository: "agent-one__code-library" },
       backends: [module],
     });
 
@@ -533,8 +553,7 @@ describe("Artifacts-backed code library", () => {
     const ws = new Workspace({
       storage: new SQLiteTestStorage(),
       sessionId: "agent-one",
-      artifacts: { binding: new GitArtifacts() },
-      codeLibrary: true,
+      codeLibrary: { binding: new GitArtifacts(), repository: "agent-one__code-library" },
       backends: [module],
     });
 
@@ -632,90 +651,13 @@ describe("Artifacts-backed code library", () => {
     expect(library(restored).read(run.id).code).toBe(source);
   });
 
-  it("makes only reviewed code available as a named tool on a later workspace", async () => {
-    const binding = new GitArtifacts();
-    const ws = workspace(new SQLiteTestStorage(), binding, []);
-    const source = "export default ({ rows }) => rows.length;";
-    await (await ws.runtime.exec(source)).result();
-    expect(createAITools({ workspace: ws }).saved_count_rows).toBeUndefined();
-    await library(ws).promote(library(ws).list()[0].id, "count_rows", "Count rows in input.rows");
-    const calls: string[] = [];
-
-    const restored = new Workspace({
-      storage: new SQLiteTestStorage(),
-      sessionId: "agent-one",
-      artifacts: { binding },
-      codeLibrary: true,
-      backends: [backend(calls), { ...backend([]), id: "other" }],
-    });
-
-    await restored.ready();
-
-    const tool = createAITools({
-      workspace: restored,
-      savedCodeTools: true,
-      exec: {
-        output: { maxBytes: 32, maxLines: 2 },
-        metadata: ({ toolCallId }) => ({ conversationId: `conversation-for-${toolCallId}` }),
-      },
-    }).saved_count_rows;
-
-    expect(
-      createAITools({ workspace: restored, exec: { backends: { other: {} } } }).saved_count_rows,
-    ).toBeUndefined();
-
-    if (!tool.execute) throw new Error("Expected an executable saved tool");
-    const exec = vi.spyOn(restored.runtime, "exec");
-    expect(
-      await tool.execute({ input: '{"rows":[1,2]}' }, { toolCallId: "reviewed", messages: [] }),
-    ).toBe(42);
-    expect(exec).toHaveBeenCalledWith(
-      source,
-      expect.objectContaining({
-        input: { rows: [1, 2] },
-        output: { maxBytes: 32, maxLines: 2 },
-        metadata: {
-          conversationId: "conversation-for-reviewed",
-          toolCallId: "reviewed",
-          purpose: "Run reviewed tool count_rows",
-        },
-      }),
-    );
-    expect(calls).toEqual([source]);
-    expect(library(restored).list()).toHaveLength(2);
-  });
-
-  it("omits reviewed tools when their backend no longer accepts function input", async () => {
-    const binding = new GitArtifacts();
-    const ws = workspace(new SQLiteTestStorage(), binding, []);
-    await (await ws.runtime.exec("export default () => 42;")).result();
-    await library(ws).promote(library(ws).list()[0].id, "answer", "Return an answer");
-    const incompatible = { ...backend([]), callable: false };
-
-    const restored = new Workspace({
-      storage: new SQLiteTestStorage(),
-      sessionId: "agent-one",
-      artifacts: { binding },
-      codeLibrary: true,
-      backends: [incompatible],
-    });
-
-    await restored.ready();
-    expect(
-      createAITools({ workspace: restored, savedCodeTools: true }).saved_answer,
-    ).toBeUndefined();
-  });
-
-  it("requires a scoped artifact and leaves disabled workspaces alone", () => {
-    expect(() => new Workspace({ storage: new SQLiteTestStorage(), codeLibrary: true })).toThrow(
-      "sessionId",
-    );
+  it("leaves unconfigured workspaces alone", () => {
     const ws = new Workspace({ storage: new SQLiteTestStorage() });
     expect(ws.codeLibrary).toBeUndefined();
     expect(ws.runtime.codeLibraryEnabled).toBe(false);
   });
 
-  it("does not reuse one agent's private Git store for another scope", async () => {
+  it("does not reuse one library's private Git store for another repository", async () => {
     const storage = new SQLiteTestStorage();
     const binding = new GitArtifacts();
     await workspace(storage, binding, []).ready();
@@ -723,8 +665,7 @@ describe("Artifacts-backed code library", () => {
     const other = new Workspace({
       storage,
       sessionId: "another-agent",
-      artifacts: { binding },
-      codeLibrary: true,
+      codeLibrary: { binding, repository: "another-library" },
     });
 
     await expect(other.ready()).rejects.toThrow("different artifact");

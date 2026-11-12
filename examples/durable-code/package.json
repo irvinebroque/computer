@@ -3,7 +3,7 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "description": "An agent that saves generated JavaScript to Artifacts and reuses reviewed code.",
+  "description": "An agent that captures JavaScript in Artifacts and reuses it across sessions.",
   "scripts": {
     "dev": "cf dev",
     "deploy": "cf deploy",

@@ -1,4 +1,3 @@
-import type { CodeLibrary } from "../../code-library/library";
 import type { ExecBackends, ExecMetadata, ExecToolOptions, ExecWorkspaceLike } from "./exec";
 import { confineWorkspace } from "./fs/confine";
 import type { EditToolOptions } from "./fs/edit";
@@ -9,9 +8,7 @@ import type { PublishWorkspaceLike } from "./publish";
 
 /** Options every tool set takes: `createAITools`, `createPiTools`, and `createTanStackTools`. */
 export interface CreateToolsOptions {
-  workspace: FileWorkspaceLike &
-    Partial<ExecWorkspaceLike> &
-    Partial<PublishWorkspaceLike> & { readonly codeLibrary?: Pick<CodeLibrary, "promoted"> };
+  workspace: FileWorkspaceLike & Partial<ExecWorkspaceLike> & Partial<PublishWorkspaceLike>;
   /** Omit `write`, `edit`, `delete`, `exec`, and `publish`. */
   readonly?: boolean;
   root?: string;

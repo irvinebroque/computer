@@ -15,12 +15,11 @@ class MemoryRepository implements CodeLibraryRepository {
   filesSnapshot() {
     return new Map(this.files);
   }
-  async commit(files: Record<string, string | null>) {
+  async commit(files: Record<string, string>) {
     if (this.fail) throw new Error("Artifact unavailable");
 
     for (const [path, content] of Object.entries(files)) {
-      if (content === null) this.files.delete(path);
-      else this.files.set(path, content);
+      this.files.set(path, content);
     }
 
     this.commits.push(new Map(this.files));
@@ -34,20 +33,6 @@ function library(repository: MemoryRepository) {
 }
 
 describe("code library", () => {
-  it("lets the host remove a promotion before deleting its retained run", async () => {
-    const lib = library(new MemoryRepository());
-    await lib.start("codemode", "keep", "export default () => 42;", {});
-    await lib.finish("codemode", "keep", 0);
-    const run = lib.list()[0];
-    await lib.promote(run.id, "answer", "Return an answer");
-    await expect(lib.deleteRun(run.id)).rejects.toThrow("promoted");
-    await lib.unpromote("answer");
-    expect(lib.promoted()).toEqual([]);
-    await lib.deleteRun(run.id);
-    expect(lib.list()).toEqual([]);
-    expect(() => lib.read(run.id)).toThrow("Unknown saved run");
-  });
-
   it.each([
     { status: "unknown" },
     { status: "started" },
@@ -89,18 +74,12 @@ describe("code library", () => {
     },
   );
 
-  it.each(["runs/r/metadata.json", "tools/reviewed.json"])(
-    "rejects malformed artifact metadata in %s",
-    async (path) => {
-      const repository = new MemoryRepository();
-      const lib = library(repository);
-      await lib.ready();
-      repository.files.set(path, JSON.stringify({ status: "succeeded" }));
-      expect(() => (path.startsWith("runs/") ? lib.list() : lib.promoted())).toThrow(
-        /Invalid input/,
-      );
-    },
-  );
+  it("rejects malformed artifact metadata", async () => {
+    const repository = new MemoryRepository();
+    const lib = library(repository);
+    repository.files.set("runs/r/metadata.json", JSON.stringify({ status: "succeeded" }));
+    expect(() => lib.list()).toThrow("Invalid input");
+  });
 
   it("stores source and minimal context before execution and retains failed attempts", async () => {
     const repository = new MemoryRepository();
@@ -141,16 +120,5 @@ describe("code library", () => {
       lib.start("b", "same-id", "export default () => 2;", {}),
     ]);
     expect(lib.list()).toHaveLength(2);
-  });
-
-  it("promotes only successful runs and pins the reviewed source", async () => {
-    const lib = library(new MemoryRepository());
-    await lib.start("codemode", "r", "export default ({ amount }) => amount * 2;", {});
-    const run = lib.list()[0];
-    await expect(lib.promote(run.id, "double", "Double an amount")).rejects.toThrow("successful");
-    await lib.finish("codemode", "r", 0);
-    await lib.promote(run.id, "double", "Double an amount");
-    expect(lib.promoted()[0]).toMatchObject({ name: "double", code: lib.read(run.id).code });
-    await expect(lib.promote(run.id, "../escape", "Invalid")).rejects.toThrow("name");
   });
 });

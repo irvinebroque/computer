@@ -1,19 +1,18 @@
-# Shared durable code library
+# Durable code library
 
-Save generated JavaScript to an Artifact. Let later sessions find and reuse it.
-Optionally review a successful run and expose it as a named tool.
+Capture generated JavaScript in an Artifact. In later sessions, search the
+library, read an earlier solution, and execute or adapt it through Code Mode.
+Computer saves that execution too.
 
 ```mermaid
 flowchart LR
-  A[Session Alice] --> W[One durable host writer]
-  B[Session Bob] --> W
-  W -->|capture source and outcomes| R["Artifact: finance-code"]
-  R -->|refresh| F[Read-only mounted files]
-  F -->|search, read, reuse| W
-  R -->|optional host review| T[Opt-in named tools]
+  T[Task] --> S[Search and read earlier code]
+  S --> E[Execute or adapt]
+  E -->|automatic capture| A[Artifact library]
+  A -->|next session| S
 ```
 
-## Select the library
+## Give Workspace a library
 
 ```ts
 const workspace = new Workspace({
@@ -28,19 +27,18 @@ await workspace.codeLibrary?.refresh(); // start of each turn
 const tools = createAITools({ workspace });
 ```
 
-| Choice | Result |
+The binding selects an Artifacts namespace. The repository name selects which
+sessions share code. In an application, derive it from the authorized user or
+project.
+
+| Selection | Result |
 | --- | --- |
-| Same binding + `"finance-code"` | Sessions share one library. |
+| Same binding and repository | Sessions share the library. |
 | Different repository names | Libraries stay separate. |
 | Session ends | The Artifact remains. |
-| `capture: false` | Read and curate without automatically saving executions. |
-| `readOnly: true` | Read an existing library using read tokens; no capture or curation. |
+| `readOnly: true` | Read an existing library using read tokens; executions do not append to it. |
 
-The binding selects a namespace. The repository name selects the sharing and
-retention boundary. In an application, derive that name from the authorized
-user or project.
-
-## Run across sessions
+## Run the learning loop
 
 ```sh
 # From the repository root:
@@ -60,118 +58,45 @@ mkdir -p node_modules
 ln -s ../../../node_modules/wrangler node_modules/wrangler
 ```
 
-Set `DEMO_TOKEN` in your terminal. Alice creates code:
+Set `DEMO_TOKEN` in your terminal. Alice creates and executes code:
 
 ```sh
 curl 'http://localhost:8787/run?repository=finance-code' \
   -H "Authorization: Bearer $DEMO_TOKEN" \
   -H 'Content-Type: application/json' \
-  -d '{"sessionId":"alice","task":"Write and execute a function that sums input.amounts. Try [12, 8, 5]."}'
+  -d '{"sessionId":"alice","task":"Write and execute a self-contained module that sums input.amounts. Try [12, 8, 5]."}'
 ```
 
-Bob reuses it in a fresh conversation, before any promotion:
+Bob starts a fresh conversation and reuses it:
 
 ```sh
 curl 'http://localhost:8787/run?repository=finance-code' \
   -H "Authorization: Bearer $DEMO_TOKEN" \
   -H 'Content-Type: application/json' \
-  -d '{"sessionId":"bob","task":"Find the sum function in your library and use it with [3, 4, 9]."}'
+  -d '{"sessionId":"bob","task":"Search your code library for the sum function. Read it and execute it with [3, 4, 9]."}'
 ```
 
-Change `repository=engineering-code` to use another library and writer.
-The default is `finance-code`. Every endpoint requires the demo token.
-
-## Read a consistent snapshot
-
-The example routes each repository to one durable agent and serializes its
-turns and host operations. Other Workspaces can read the same library:
-
-```ts
-const reader = new Workspace({
-  storage: readerStorage,
-  sessionId: "another-session",
-  codeLibrary: {
-    binding: env.ARTIFACTS,
-    repository: "finance-code",
-    readOnly: true,
-  },
-});
-
-await reader.ready();                       // initial snapshot
-await reader.codeLibrary?.refresh();         // next turn's snapshot
-await reader.fs.grep("sum", "/workspace/.code-library");
-```
-
-| Rule | Behavior |
-| --- | --- |
-| Refresh timing | The host calls `refresh()` at turn boundaries. No background polling. |
-| Between refreshes | Reads use the current snapshot. Local library writes update that Workspace's view. |
-| Writer coordination | One writer per repository; sequential handoffs synchronize before writes. |
-| Conflicting push | Reject and retain the local commit. No force-push or automatic merge. |
-| Local storage | Keep one repository identity per storage database. |
-
-For many autonomous writers, use separate capture repositories and a shared
-curated library. [Artifacts best practices](https://developers.cloudflare.com/artifacts/concepts/best-practices/)
-explain that scaling boundary.
-
-## Optional review and promotion
-
-Inspect the source and metadata:
+Inspect both captured executions:
 
 ```sh
 curl 'http://localhost:8787/library?repository=finance-code' \
   -H "Authorization: Bearer $DEMO_TOKEN"
 ```
 
-Choose a successful run, review it, and promote it:
+Every request requires the demo token. Change `repository=engineering-code` to
+use a separate library. The default is `finance-code`.
 
-```sh
-curl 'http://localhost:8787/promote?repository=finance-code' \
-  -H "Authorization: Bearer $DEMO_TOKEN" \
-  -H 'Content-Type: application/json' \
-  -d '{"id":"<run id>","name":"sum_amounts","description":"Sum input.amounts, an array of numbers; return the total."}'
+## What the agent sees
+
+```text
+/workspace/.code-library/
+  runs/<id>/code.js
+  runs/<id>/metadata.json
 ```
 
-Set `useReviewedTools: true` in a later `/run` body to expose
-`saved_sum_amounts`. The equivalent host API is:
-
-```ts
-await workspace.codeLibrary?.promote(runId, "sum_amounts", description);
-const tools = createAITools({ workspace, savedCodeTools: true });
-```
-
-The tool accepts a JSON-encoded `input` object. Its description explains the
-fields. Promotion pins the source and records `approvedAt`. Rebuild the tool
-set after refresh to pick up review decisions. Without the opt-in, file-based
-reuse still works.
-
-## Retention and host API
-
-These operations belong to the host; none becomes a model tool.
-
-| API | Purpose | Demo endpoint |
-| --- | --- | --- |
-| `list()` / `read(id)` | Inspect captured source and outcomes. | `GET /library` |
-| `refresh()` | Load a new committed snapshot and update the mount. | Before every turn |
-| `promote(id, name, description)` | Approve and pin successful source. | `POST /promote` |
-| `promoted()` | List reviewed code. | Included in `/library` |
-| `unpromote(name)` | Remove a reviewed tool. | `DELETE /tools/<name>` |
-| `deleteRun(id)` | Remove an unpromoted run from the current tree. | `DELETE /runs/<id>` |
-
-All endpoints accept `?repository=finance-code`. For example:
-
-```ts
-await workspace.codeLibrary?.unpromote("sum_amounts");
-await workspace.codeLibrary?.deleteRun(runId);
-```
-
-Git history retains deleted files. Rotate or delete the Artifact for the full
-retention boundary; use fresh local storage for another repository identity.
-
-## What gets saved
-
-Pass a self-contained module to `exec`. For example, the host API captures this
-source and purpose:
+Ordinary `ls`, `grep`, and `read` tools work on this read-only directory. Each
+record includes purpose, execution and session identities, timestamps, and the
+observed outcome. Code runs through the ordinary sandboxed `exec` tool.
 
 ```ts
 using run = await workspace.runtime.exec(
@@ -185,34 +110,26 @@ using run = await workspace.runtime.exec(
 await run.result(); // result: 25
 ```
 
-```text
-/workspace/.code-library/
-  runs/<id>/code.js
-  runs/<id>/metadata.json  # purpose, ids, timestamps, status, exit code
-  tools/<name>.json       # optional reviewed source and approval time
-```
+Capture stores module source. Imported files, dependencies, inputs, outputs,
+and shell-launched JavaScript are outside this snapshot. Use self-contained
+modules for reuse.
 
-| Event | Result |
+## Sharing and failures
+
+The example routes each repository to one durable host writer and serializes
+its turns. Other Workspaces can use `readOnly: true` and call `refresh()` at the
+start of each turn.
+
+| Rule or event | Behavior |
 | --- | --- |
-| Capture push fails | Execution does not start. |
+| Refresh | Load a committed snapshot and update the mount. No background polling. |
+| Between refreshes | Reads keep that snapshot; local captures update the writer's view. |
+| Writer coordination | One writer per repository. Conflicting pushes reject and retain local commits. |
+| Local storage | One repository identity per storage database. |
+| Source push fails | Execution does not start. |
 | Dispatch acknowledgement is lost | Status stays `started` until a terminal event is observed. |
-| Outcome push fails | Return the actual result; retain the local outcome for retry. |
-| Execution handle is replayed | Record the observed outcome. |
+| Outcome push fails | Return the execution result and retain the outcome locally for retry. |
 
-Capture saves module source. Inputs, environment variables, output, imported
-files, dependencies, and shell-launched JavaScript are outside this snapshot.
-Git data and credentials stay outside the read-only mount. A successful exit
-does not imply human approval.
-
-## Existing snippets, skills, and per-agent mode
-
-| Need | Use |
-| --- | --- |
-| Connector-backed Code Mode scripts | Existing [`saveSnippet` / `codemode.search` / `codemode.run`](https://github.com/cloudflare/agents/blob/main/docs/codemode/snippets.md). |
-| Computer module source across sessions | This Artifact-backed library. |
-| Curated instructions and supporting scripts | [Workspace skills](https://developers.cloudflare.com/agents/skills/sources/computer/). |
-| Per-agent convenience | `codeLibrary: true` with scoped `artifacts` and a non-empty `sessionId`; selects `<sessionId>__code-library`. |
-
-Code Mode snippets store connector function source on their durable runtime;
-Computer runs modules with a default export. The snippet runtime has no storage
-provider hook, so this example does not change its store or execution contract.
+The application owns the Artifact's lifetime and retention through the
+Artifacts API. For many independent writers, use separate capture repositories;
+see [Artifacts best practices](https://developers.cloudflare.com/artifacts/concepts/best-practices/).

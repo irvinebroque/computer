@@ -558,15 +558,13 @@ backend exposes an `artifacts` command. See
 
 ### Durable code libraries
 
-Select an Artifacts repository independently of the Workspace session. Computer
-pushes module source and execution context before dispatch, then records the
-observed exit code. Agents search earlier runs through ordinary file tools at
-the read-only `/workspace/.code-library` mount. Reuse does not require promotion.
+Give Workspace an Artifacts repository to automatically capture generated
+module source, purpose, execution identity, and observed outcome:
 
 ```ts
 const workspace = new Workspace({
   storage: ctx.storage,
-  sessionId: ctx.id.toString(),
+  sessionId,
   backends: [new CodemodeBackend({ loader: env.LOADER })],
   codeLibrary: { binding: env.ARTIFACTS, repository: "finance-code" },
 });
@@ -575,52 +573,37 @@ await workspace.codeLibrary?.refresh(); // at the start of a turn
 const tools = createAITools({ workspace });
 ```
 
-The binding selects a namespace. The repository name selects sharing and
-lifetime independently of the session:
-
 ```mermaid
 flowchart LR
-  A[Session A] --> F["Artifact: finance-code"]
-  B[Session B] --> F
-  C[Session C] --> E["Artifact: engineering-code"]
+  A[Task] --> B[Search and read saved code]
+  B --> C[Execute or adapt]
+  C -->|automatic capture| D[Artifact]
+  D -->|next session| B
 ```
 
-| Configuration | Behavior |
-| --- | --- |
-| Default writer | Automatically capture source, purpose, ids, timestamps, and observed outcomes. |
-| `capture: false` | Disable automatic capture; keep host curation access. |
-| `readOnly: true` | Read an existing repo using read tokens; no capture or curation. |
-| `codeLibrary: true` | Per-agent convenience: use scoped `artifacts` and a non-empty `sessionId` to select `<sessionId>__code-library`. |
+Agents use ordinary file tools on the read-only mount:
 
-| Host API | Behavior |
-| --- | --- |
-| `ready()` | Load the initial snapshot. |
-| `codeLibrary.refresh()` | Fetch a new snapshot and update the read-only mount. |
-| `codeLibrary.list()` / `.read(id)` | Inspect saved metadata and source. |
-| `.promote(id, name, description)` | Pin successful source with an approval timestamp. |
-| `.unpromote(name)` | Remove a reviewed tool. |
-| `.deleteRun(id)` | Remove an unpromoted run from the current tree. |
-
-Named tools are optional, with a JSON-encoded `input` object described by the
-host. Reuse through files works without them:
-
-```ts
-await workspace.codeLibrary?.promote(runId, "sum_amounts", description);
-const tools = createAITools({ workspace, savedCodeTools: true });
+```text
+/workspace/.code-library/runs/<id>/code.js
+/workspace/.code-library/runs/<id>/metadata.json
 ```
 
-- Call `refresh()` at turn boundaries. Reads keep that snapshot until refresh or a local library write.
-- Coordinate one writer per repository. Writes synchronize; conflicting pushes retain local commits and reject. No automatic merge or force-push.
-- Keep one repository identity per local storage database.
-- Session termination does not delete the repo. Tree deletions retain Git history; delete or rotate the Artifact for full retention.
-- Host calls can attach `metadata: { purpose, conversationId, sessionId }`. Run keys include the Workspace session or a durable local identity.
-- Promotion and retention are host operations; neither is offered to the model.
+| Choice | Behavior |
+| --- | --- |
+| Same binding and repository | Share code across sessions; the Artifact outlives them. |
+| Different repository names | Keep libraries separate. |
+| `readOnly: true` | Read an existing library using read tokens; no capture. |
+| `codeLibrary.refresh()` | Load the next committed snapshot and update the mount. |
+| `codeLibrary.list()` / `.read(id)` | Inspect metadata and source from the current snapshot. |
 
-The explicit form needs no separate `artifacts` option and does not expose
-the library binding through the shell's Artifacts command.
+Coordinate one writer per repository and keep one repository per local storage
+database. Conflicting pushes reject and retain local commits. The explicit
+library binding is not exposed through the shell's Artifacts command.
 
-See [`examples/durable-code`](../../examples/durable-code) for the full example,
-including failure behavior and the source-only reuse contract.
+Capture saves module source, excluding imported files, dependencies, inputs,
+and outputs. The application manages Artifact retention and lifetime.
+See [`examples/durable-code`](../../examples/durable-code) for the runnable
+learning loop, sharing rules, and failure behavior.
 
 ## Crossing the Worker → DO boundary
 
@@ -784,7 +767,7 @@ An adapter for the Cloudflare runtime lives at
 - [`examples/codemode`](../../examples/codemode) — the
   same shape, running ECMAScript modules instead of shell commands.
 - [`examples/durable-code`](../../examples/durable-code) — capture generated
-  code in Artifacts, find it in later conversations, and promote reviewed runs.
+  code in Artifacts, find it in later conversations, and execute or adapt it.
 - [`examples/container`](../../examples/container) — the container
   backend running `computerd`.
 - [`examples/container-legacy`](../../examples/container-legacy) — the

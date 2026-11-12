@@ -19,7 +19,7 @@ export class GitCodeLibraryRepository implements CodeLibraryRepository {
   constructor(
     private readonly db: Database,
     private readonly artifacts: ArtifactClient,
-    private readonly name = "code-library",
+    private readonly name: string,
     private readonly readOnly = false,
   ) {
     this.#fs = new SqlGitFilesystem(db);
@@ -107,18 +107,12 @@ export class GitCodeLibraryRepository implements CodeLibraryRepository {
     await this.#fetchSnapshot();
   }
 
-  async commit(files: Record<string, string | null>, message: string): Promise<string> {
+  async commit(files: Record<string, string>, message: string): Promise<string> {
     if (this.readOnly) throw new Error("Code library is read-only");
     await this.ready();
     const git = await import("isomorphic-git");
 
     for (const [path, content] of Object.entries(files)) {
-      if (content === null) {
-        await git.remove({ fs: this.#fs, dir: "/", filepath: path });
-        await this.#fs.promises.unlink(`/${path}`);
-        continue;
-      }
-
       let parent = posix.dirname(`/${path}`);
       const missing: string[] = [];
 
@@ -237,8 +231,7 @@ export class GitCodeLibraryRepository implements CodeLibraryRepository {
     const files = new Map<string, string>();
 
     for (const filepath of paths) {
-      if (!/^(runs\/[^/]+\/(code\.js|metadata\.json)|tools\/[a-z][a-z0-9_]*\.json)$/.test(filepath))
-        continue;
+      if (!/^runs\/[^/]+\/(code\.js|metadata\.json)$/.test(filepath)) continue;
       const { blob } = await git.readBlob({ fs: this.#fs, dir: "/", oid, filepath });
       files.set(filepath, new TextDecoder().decode(blob));
     }
