@@ -608,6 +608,7 @@ describe("mount versions", () => {
     const entered = Promise.withResolvers<undefined>();
     const unblock = Promise.withResolvers<undefined>();
     let version = "one";
+
     const mount: EagerMount = {
       kind: "changing",
       mode: "read-only",
@@ -615,18 +616,22 @@ describe("mount versions", () => {
       version: () => version,
       async materialize(api) {
         const content = version;
+
         if (content === "one") {
           entered.resolve(undefined);
           await unblock.promise;
         }
+
         await api.writeFile(`${api.root}/version.txt`, streamOf(utf8(content)));
       },
     };
+
     const index = new MountIndex({
       db: new Database(storage),
       fs: ws.fs,
       mounts: new Map([["/changing", mount]]),
     });
+
     const indexing = index.ensureIndexed();
     await entered.promise;
     version = "two";

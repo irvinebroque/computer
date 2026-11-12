@@ -13,9 +13,11 @@ export class SqlGitFilesystem {
       path TEXT PRIMARY KEY, content BLOB, mtime INTEGER NOT NULL
     )`);
     db.run("INSERT OR IGNORE INTO workspace_code_library_git VALUES ('/', NULL, 0)");
+
     const stat = async (path: string) => {
       const entry = this.entry(path);
       const directory = entry.content === null;
+
       return {
         size: entry.content?.byteLength ?? 0,
         mode: directory ? 0o40755 : 0o100644,
@@ -32,11 +34,13 @@ export class SqlGitFilesystem {
         isSymbolicLink: () => false,
       };
     };
+
     this.promises = {
       stat,
       lstat: stat,
       readFile: async (path: string, options?: BufferEncoding | { encoding?: BufferEncoding }) => {
         const content = this.entry(path).content;
+
         if (content === null) throw fsError("EISDIR", path);
         const bytes = Buffer.from(content);
 
@@ -46,6 +50,7 @@ export class SqlGitFilesystem {
       },
       writeFile: async (path: string, content: Uint8Array | string) => {
         path = posix.resolve("/", path);
+
         if (this.entry(posix.dirname(path)).content !== null) throw fsError("ENOTDIR", path);
         db.run(
           "INSERT OR REPLACE INTO workspace_code_library_git VALUES (?, ?, ?)",
@@ -56,12 +61,15 @@ export class SqlGitFilesystem {
       },
       mkdir: async (path: string) => {
         path = posix.resolve("/", path);
+
         if (this.exists(path)) throw fsError("EEXIST", path);
+
         if (this.entry(posix.dirname(path)).content !== null) throw fsError("ENOTDIR", path);
         db.run("INSERT INTO workspace_code_library_git VALUES (?, NULL, ?)", path, Date.now());
       },
       readdir: async (path: string) => {
         path = posix.resolve("/", path);
+
         if (this.entry(path).content !== null) throw fsError("ENOTDIR", path);
 
         const children: string[] = [];
@@ -109,7 +117,9 @@ export class SqlGitFilesystem {
       "SELECT * FROM workspace_code_library_git WHERE path = ?",
       posix.resolve("/", path),
     );
+
     if (!entry) throw fsError("ENOENT", path);
+
     return entry;
   }
 

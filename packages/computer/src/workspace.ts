@@ -280,10 +280,12 @@ export class Workspace {
       : createDisabledArtifactsClient();
     this.#db = new Database(options.storage);
     initializeSchema(this.#db, this.#now);
+
     if (options.codeLibrary) {
       if (!options.artifacts || !this.#artifacts.sessionId) {
         throw new Error("codeLibrary requires an Artifacts binding and a non-empty sessionId");
       }
+
       this.codeLibrary = new CodeLibrary(
         new GitCodeLibraryRepository(this.#db, this.#artifacts),
         async () => {
@@ -292,6 +294,7 @@ export class Workspace {
         },
       );
     }
+
     this.#executionRuntimes = new ExecutionRuntimeTracker(
       1_024,
       new SqlExecutionRuntimeStore(this.#db),
@@ -322,6 +325,7 @@ export class Workspace {
     this.#observer = options.observer ?? noopObserver;
     this.#syncLogger =
       options.syncTelemetry ?? createSyncLogger({ enabled: options.syncTelemetryEnabled ?? false });
+
     if (this.codeLibrary && options.mounts?.[CODE_LIBRARY_ROOT]) {
       throw new Error(`codeLibrary reserves ${CODE_LIBRARY_ROOT}`);
     }

@@ -21,13 +21,16 @@ class GitArtifacts extends FakeArtifactsBinding {
     const result = await super.create(name, opts);
     runGit(["init", "--bare", "--initial-branch=main", join(root, `${name}.git`)]);
     runGit(["--git-dir", join(root, `${name}.git`), "config", "http.receivepack", "true"]);
+
     return result;
   }
 }
 
 function runGit(args: string[]): Buffer {
   const result = spawnSync("git", args);
+
   if (result.status !== 0) throw new Error(result.stderr.toString());
+
   return result.stdout;
 }
 
@@ -38,6 +41,7 @@ beforeEach(() => {
     if (offline) throw new Error("Artifact unavailable");
     const request = new Request(input, init);
     const url = new URL(request.url);
+
     const result = spawnSync("git", ["http-backend"], {
       env: {
         ...process.env,
@@ -51,14 +55,19 @@ beforeEach(() => {
       input: Buffer.from(await request.arrayBuffer()),
       maxBuffer: 16 * 1024 * 1024,
     });
+
     if (result.status !== 0) throw new Error(result.stderr.toString());
     const split = result.stdout.indexOf("\r\n\r\n");
     const headers = new Headers();
+
     for (const line of result.stdout.subarray(0, split).toString().split("\r\n")) {
       const colon = line.indexOf(":");
+
       if (colon > 0) headers.set(line.slice(0, colon), line.slice(colon + 1).trim());
     }
+
     const status = Number(headers.get("Status")?.split(" ")[0] ?? 200);
+
     return new Response(new Uint8Array(result.stdout.subarray(split + 4)), { headers, status });
   });
 });
@@ -79,6 +88,7 @@ function backend(calls: string[], exitCode = 0): WorkspaceModuleBackend {
         async exec(input) {
           const id = input.id ?? "test-execution";
           calls.push(input.source);
+
           return {
             id,
             events: new ReadableStream({
@@ -117,6 +127,7 @@ function workspace(storage: SQLiteTestStorage, binding: Artifacts, calls: string
 
 function library(ws: Workspace) {
   if (!ws.codeLibrary) throw new Error("Expected a code library");
+
   return ws.codeLibrary;
 }
 
@@ -204,6 +215,7 @@ describe("Artifacts-backed code library", () => {
     expect(createAITools({ workspace: ws }).saved_count_rows).toBeUndefined();
     await library(ws).promote(library(ws).list()[0].id, "count_rows", "Count rows in input.rows");
     const calls: string[] = [];
+
     const restored = new Workspace({
       storage: new SQLiteTestStorage(),
       sessionId: "agent-one",
@@ -211,11 +223,13 @@ describe("Artifacts-backed code library", () => {
       codeLibrary: true,
       backends: [backend(calls), { ...backend([]), id: "other" }],
     });
+
     await restored.ready();
     const tool = createAITools({ workspace: restored }).saved_count_rows;
     expect(
       createAITools({ workspace: restored, exec: { backends: { other: {} } } }).saved_count_rows,
     ).toBeUndefined();
+
     if (!tool.execute) throw new Error("Expected an executable saved tool");
     const exec = vi.spyOn(restored.runtime, "exec");
     expect(
@@ -239,12 +253,14 @@ describe("Artifacts-backed code library", () => {
     const storage = new SQLiteTestStorage();
     const binding = new GitArtifacts();
     await workspace(storage, binding, []).ready();
+
     const other = new Workspace({
       storage,
       sessionId: "another-agent",
       artifacts: { binding },
       codeLibrary: true,
     });
+
     await expect(other.ready()).rejects.toThrow("different artifact");
   });
 });

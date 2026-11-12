@@ -212,12 +212,15 @@ export function defineExec(options: ExecToolOptions): ExecDefinition {
       (callable ? "Runs `command` as module source." : "Runs shell commands.");
     return { id, text, callable };
   });
+
   const callableBackendIds = new Set(backends.filter((b) => b.callable).map((b) => b.id));
+
   const description =
     describeTool(backends, limits) +
     (runtime.codeLibraryEnabled
       ? "\n\nYour saved code is in /workspace/.code-library. Use ls, grep, and read to check it before writing new code. Provide a short purpose for each execution."
       : "");
+
   // Offer only the fields that can work: `backend` when there is a
   // choice, `input` when some backend accepts it.
   const commonFields = {
@@ -247,6 +250,7 @@ export function defineExec(options: ExecToolOptions): ExecDefinition {
         "Which backend to run on. If a command fails because the backend lacks that tool, retry on a backend whose description covers it.",
       );
   }
+
   if (callableBackendIds.size > 0) {
     additionalFields.input = z
       .record(z.string(), jsonValueSchema)
@@ -275,6 +279,7 @@ export function defineExec(options: ExecToolOptions): ExecDefinition {
         return;
       }
       const base = { command, cwd: cwd ?? null, backend: selectedBackend };
+
       if (input !== undefined && !callableBackendIds.has(selectedBackend)) {
         yield { ...base, error: notCallableMessage(selectedBackend) };
         return;

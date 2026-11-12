@@ -110,8 +110,10 @@ export class WorkspaceRuntime {
     }
     const runtime = await this.#options.backendHandle(backend);
     const registered = this.#options.backends.get(backend);
+
     const library =
       registered && isModuleBackend(registered) ? this.#options.codeLibrary : undefined;
+
     const capture = library ? { library, id: options.id ?? crypto.randomUUID() } : undefined;
     const id = capture?.id ?? options.id;
 
@@ -123,6 +125,7 @@ export class WorkspaceRuntime {
     }
 
     let envelope: ModuleExecutionEnvelope;
+
     try {
       envelope = await runtime.exec({
         id,

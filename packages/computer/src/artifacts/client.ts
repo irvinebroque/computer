@@ -148,6 +148,7 @@ export function createArtifact(binding: Artifacts, sessionId?: string | null): A
 
       try {
         const info = await view.info();
+
         return repoInfo(info, name);
       } finally {
         view[Symbol.dispose]?.();

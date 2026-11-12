@@ -70,6 +70,7 @@ export class CodeLibrary {
     const files = this.repository.filesSnapshot();
     const metadata = files.get(`runs/${id}/metadata.json`);
     const code = files.get(`runs/${id}/code.js`);
+
     if (metadata === undefined || code === undefined) throw new Error(`Unknown saved run: ${id}`);
 
     return { ...this.#schemas.run.parse(JSON.parse(metadata)), code };
@@ -86,12 +87,15 @@ export class CodeLibrary {
       await this.repository.flush();
       const id = runKey(backend, executionId);
       const existing = this.list().find((run) => run.id === id);
+
       if (existing) {
         if (this.read(id).code !== code)
           throw new Error("Execution id already has different saved code");
         await this.onChange?.();
+
         return;
       }
+
       const run: CodeLibraryRun = {
         id,
         executionId,
@@ -122,8 +126,10 @@ export class CodeLibrary {
       await this.ready();
       await this.repository.flush();
       const id = runKey(backend, executionId);
+
       if (!this.list().some((run) => run.id === id)) return;
       const { code: _code, ...run } = this.read(id);
+
       if (run.status !== "started") return;
       await this.repository.commit(
         {
@@ -148,11 +154,15 @@ export class CodeLibrary {
     return this.#serialize(async () => {
       await this.ready();
       await this.repository.flush();
+
       if (!/^[a-z][a-z0-9_]{0,63}$/.test(name))
         throw new Error("Tool name must contain lowercase letters, digits, or underscores");
+
       if (!description.trim()) throw new Error("Tool description is required");
       const run = this.read(id);
+
       if (run.status !== "succeeded") throw new Error("Only successful runs can be promoted");
+
       const promoted: PromotedCode = {
         name,
         description,
@@ -190,6 +200,7 @@ export class CodeLibrary {
       mode: "read-only",
       version: async () => {
         await this.ready();
+
         return this.repository.version();
       },
       materialize: async (api) => {

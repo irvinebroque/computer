@@ -16,8 +16,10 @@ class MemoryRepository implements CodeLibraryRepository {
   }
   async commit(files: Record<string, string>) {
     if (this.fail) throw new Error("Artifact unavailable");
+
     for (const [path, content] of Object.entries(files)) this.files.set(path, content);
     this.commits.push(new Map(this.files));
+
     return this.version();
   }
 }

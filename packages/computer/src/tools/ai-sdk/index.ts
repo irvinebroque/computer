@@ -60,6 +60,7 @@ export function createAITools(options: CreateAIToolsOptions): ToolSet {
   tools.delete = createDeleteTool(resolved.delete);
 
   const exec = resolved.exec;
+
   if (exec !== undefined) {
     tools.exec = createExecTool(exec);
 

@@ -30,11 +30,13 @@ export class GitCodeLibraryRepository implements CodeLibraryRepository {
       this.#ready = undefined;
       throw cause;
     });
+
     return this.#ready;
   }
 
   async #initialize(): Promise<void> {
     const git = await import("isomorphic-git");
+
     try {
       this.#remote = (await this.artifacts.get("code-library")).remote;
     } catch (error) {
@@ -44,22 +46,29 @@ export class GitCodeLibraryRepository implements CodeLibraryRepository {
         await this.artifacts.create("code-library", { setDefaultBranch: "main" })
       ).remote;
     }
+
     const state = this.db.one<{ remote: string; initialized: number }>(
       "SELECT remote, initialized FROM workspace_code_library_state WHERE id = 1",
     );
+
     if (state && state.remote !== this.#remote)
       throw new Error("Code library storage belongs to a different artifact");
+
     if (!state)
       this.db.run("INSERT INTO workspace_code_library_state VALUES (1, ?, 0)", this.#remote);
+
     if (state?.initialized) {
       await this.flush();
+
       return;
     }
+
     // An interrupted initial clone is safe to start over; no executions used it yet.
     this.#fs.reset();
     const auth = await this.#auth();
     const http = withFetch(globalThis.fetch);
     const refs = await git.listServerRefs({ http, url: this.#remote, ...auth });
+
     if (refs.some((ref) => ref.ref === "refs/heads/main")) {
       await git.clone({
         fs: this.#fs,
@@ -74,6 +83,7 @@ export class GitCodeLibraryRepository implements CodeLibraryRepository {
     } else {
       await git.init({ fs: this.#fs, dir: "/", defaultBranch: "main" });
     }
+
     this.db.run("UPDATE workspace_code_library_state SET initialized = 1 WHERE id = 1");
   }
 
@@ -88,19 +98,24 @@ export class GitCodeLibraryRepository implements CodeLibraryRepository {
   async commit(files: Record<string, string>, message: string): Promise<string> {
     await this.ready();
     const git = await import("isomorphic-git");
+
     for (const [path, content] of Object.entries(files)) {
       let parent = posix.dirname(`/${path}`);
       const missing: string[] = [];
+
       while (!this.#fs.exists(parent)) {
         missing.unshift(parent);
         parent = posix.dirname(parent);
       }
+
       for (const directory of missing) await this.#fs.promises.mkdir(directory);
       await this.#fs.promises.writeFile(`/${path}`, content);
       await git.add({ fs: this.#fs, dir: "/", filepath: path });
     }
+
     const oid = await git.commit({ fs: this.#fs, dir: "/", message, author: AUTHOR });
     await this.flush();
+
     return oid;
   }
 
@@ -110,6 +125,7 @@ export class GitCodeLibraryRepository implements CodeLibraryRepository {
 
     if (head.trim() === this.#version) return;
     const git = await import("isomorphic-git");
+
     const result = await git.push({
       fs: this.#fs,
       http: withFetch(globalThis.fetch),
@@ -118,6 +134,7 @@ export class GitCodeLibraryRepository implements CodeLibraryRepository {
       ref: "main",
       ...(await this.#auth()),
     });
+
     if (!result.ok) throw new Error("Code library artifact push was rejected");
     await this.#publishSnapshot();
   }
@@ -128,18 +145,21 @@ export class GitCodeLibraryRepository implements CodeLibraryRepository {
     const oid = await git.resolveRef({ fs: this.#fs, dir: "/", ref: "main" });
     const paths = await git.listFiles({ fs: this.#fs, dir: "/", ref: oid });
     const files = new Map<string, string>();
+
     for (const filepath of paths) {
       if (!/^(runs\/[^/]+\/(code\.js|metadata\.json)|tools\/[a-z][a-z0-9_]*\.json)$/.test(filepath))
         continue;
       const { blob } = await git.readBlob({ fs: this.#fs, dir: "/", oid, filepath });
       files.set(filepath, new TextDecoder().decode(blob));
     }
+
     this.#published = files;
     this.#version = oid;
   }
 
   async #auth() {
     const token = await this.artifacts.createToken("code-library", "write", 300);
+
     return {
       headers: { Authorization: `Basic ${btoa(`x:${token.plaintext.split("?expires=")[0]}`)}` },
     };

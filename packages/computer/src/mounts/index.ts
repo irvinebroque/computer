@@ -369,6 +369,7 @@ export class MountIndex {
       this.#done = true;
       return Promise.resolve();
     }
+
     this.#inFlight = (async () => {
       do {
         const generation = this.#generation;
