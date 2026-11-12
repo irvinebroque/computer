@@ -114,11 +114,14 @@ export class WorkspaceRuntime {
       registered && isModuleBackend(registered) ? this.#options.codeLibrary : undefined;
     const capture = library ? { library, id: options.id ?? crypto.randomUUID() } : undefined;
     const id = capture?.id ?? options.id;
-    if (capture)
-      await capture.library.start(backend, capture.id, source, {
-        ...options.metadata,
-        ...(options.cwd ? { cwd: options.cwd } : {}),
-      });
+
+    if (capture) {
+      const metadata = { ...options.metadata };
+
+      if (options.cwd) metadata.cwd = options.cwd;
+      await capture.library.start(backend, capture.id, source, metadata);
+    }
+
     let envelope: ModuleExecutionEnvelope;
     try {
       envelope = await runtime.exec({

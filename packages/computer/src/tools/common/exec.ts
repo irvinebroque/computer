@@ -220,7 +220,7 @@ export function defineExec(options: ExecToolOptions): ExecDefinition {
       : "");
   // Offer only the fields that can work: `backend` when there is a
   // choice, `input` when some backend accepts it.
-  const shape: Record<string, z.ZodType> = {
+  const commonFields = {
     command: z.string().describe(commandHint(backends)),
     cwd: z.string().optional().describe("Working directory. Defaults to the workspace root."),
     env: z
@@ -230,14 +230,17 @@ export function defineExec(options: ExecToolOptions): ExecDefinition {
         "Environment variables for this run only. Values override the base environment without affecting later runs.",
       ),
   };
+
+  const additionalFields: Record<string, z.ZodType> = {};
+
   if (runtime.codeLibraryEnabled)
-    shape.purpose = z
+    additionalFields.purpose = z
       .string()
       .min(1)
       .max(500)
       .describe("Briefly describe what this code is intended to do.");
   if (!single) {
-    shape.backend = z
+    additionalFields.backend = z
       // SAFETY: defineExec checked that backendIds has at least one entry.
       .enum(backendIds as [string, ...string[]])
       .describe(
@@ -245,7 +248,7 @@ export function defineExec(options: ExecToolOptions): ExecDefinition {
       );
   }
   if (callableBackendIds.size > 0) {
-    shape.input = z
+    additionalFields.input = z
       .record(z.string(), jsonValueSchema)
       .optional()
       .describe(
@@ -254,8 +257,8 @@ export function defineExec(options: ExecToolOptions): ExecDefinition {
           : "Input object handed to a callable backend's module. Other backends reject it.",
       );
   }
-  // SAFETY: Every field in `shape` has the type ExecInput gives it, and the fields left out are optional there.
-  const inputSchema = z.object(shape) as unknown as z.ZodType<ExecInput>;
+
+  const inputSchema: z.ZodType<ExecInput> = z.object({ ...commonFields, ...additionalFields });
 
   return {
     description,
@@ -283,23 +286,24 @@ export function defineExec(options: ExecToolOptions): ExecDefinition {
           (typeof options.metadata === "function"
             ? options.metadata({ toolCallId: context.toolCallId ?? "" })
             : options.metadata);
+
+        let contextMetadata = metadata;
+
+        if (purpose !== undefined || runtime.codeLibraryEnabled) {
+          contextMetadata = { ...metadata };
+
+          if (purpose !== undefined) contextMetadata.purpose = purpose;
+
+          if (runtime.codeLibraryEnabled && context.toolCallId)
+            contextMetadata.toolCallId = context.toolCallId;
+        }
         handle = await options.workspace.runtime.exec(command, {
           cwd,
           encoding: "utf8",
           backend: selectedBackend,
           env,
           input,
-          ...(metadata === undefined && purpose === undefined && !runtime.codeLibraryEnabled
-            ? {}
-            : {
-                metadata: {
-                  ...metadata,
-                  ...(purpose === undefined ? {} : { purpose }),
-                  ...(runtime.codeLibraryEnabled && context.toolCallId
-                    ? { toolCallId: context.toolCallId }
-                    : {}),
-                },
-              }),
+          metadata: contextMetadata,
           // The runtime cuts and saves by the same limits the tool
           // shows, so whatever the model does not see is in the file.
           output: limits,

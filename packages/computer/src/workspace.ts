@@ -325,16 +325,14 @@ export class Workspace {
     if (this.codeLibrary && options.mounts?.[CODE_LIBRARY_ROOT]) {
       throw new Error(`codeLibrary reserves ${CODE_LIBRARY_ROOT}`);
     }
-    this.#mounts = buildMountRegistry(
-      {
-        ...options.mounts,
-        ...(this.codeLibrary ? { [CODE_LIBRARY_ROOT]: this.codeLibrary.mount() } : {}),
-      },
-      {
-        sessionId: options.sessionId,
-        vfs: () => this.provider(),
-      },
-    );
+
+    const mounts = { ...options.mounts };
+
+    if (this.codeLibrary) mounts[CODE_LIBRARY_ROOT] = this.codeLibrary.mount();
+    this.#mounts = buildMountRegistry(mounts, {
+      sessionId: options.sessionId,
+      vfs: () => this.provider(),
+    });
     this.#mountIndex = new MountIndex({
       db: this.#db,
       fs: this.#fs,

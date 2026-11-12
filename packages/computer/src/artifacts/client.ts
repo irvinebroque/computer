@@ -137,20 +137,20 @@ export function createArtifact(binding: Artifacts, sessionId?: string | null): A
 
     async get(name) {
       const handle = await binding.get(scopedName(scope, name));
-      // The handle is a live Workers-RPC stub (ArtifactsRepo extends
-      // RpcTarget). The published `@cloudflare/workers-types` shape is
-      // wrong in both directions: it models the metadata as inherited
-      // `ArtifactsRepoInfo` properties (which the runtime stub does
-      // not expose — reading `handle.remote` yields an RpcPromise for
-      // a nonexistent method) and omits `info()` (which the runtime
-      // does have, returning the metadata by value). Reach `info()`
-      // through a typed view until the published types are corrected.
-      const view = handle as unknown as { info(): Promise<ArtifactsRepoInfo> };
+
+      // SAFETY: Runtime repo handles expose info(), while published types
+      // incorrectly put metadata properties on the RPC stub. Read metadata
+      // by value; disposal is optional for in-process binding implementations.
+      const view = handle as ArtifactsRepo &
+        Partial<Disposable> & {
+          info(): Promise<ArtifactsRepoInfo>;
+        };
+
       try {
         const info = await view.info();
         return repoInfo(info, name);
       } finally {
-        (handle as unknown as Partial<Disposable>)[Symbol.dispose]?.();
+        view[Symbol.dispose]?.();
       }
     },
 
@@ -193,10 +193,13 @@ export function createArtifact(binding: Artifacts, sessionId?: string | null): A
 
     async createToken(name, tokenScope, ttl) {
       const handle = await binding.get(scopedName(scope, name));
+      // SAFETY: RPC repo handles can own a disposal hook; local bindings may omit it.
+      const disposable = handle as ArtifactsRepo & Partial<Disposable>;
+
       try {
         return await handle.createToken(tokenScope, ttl);
       } finally {
-        (handle as unknown as Partial<Disposable>)[Symbol.dispose]?.();
+        disposable[Symbol.dispose]?.();
       }
     },
 

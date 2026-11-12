@@ -38,29 +38,41 @@ export interface CodeLibraryRepository {
 
 /** An agent's saved code. Promotion is a host operation, never an agent tool. */
 export class CodeLibrary {
-  #tail: Promise<unknown> = Promise.resolve();
+  #tail: Promise<void> = Promise.resolve();
+  #schemas: typeof import("./schemas") | undefined;
 
   constructor(
     private readonly repository: CodeLibraryRepository,
     private readonly onChange?: () => Promise<void>,
   ) {}
 
-  ready(): Promise<void> {
-    return this.repository.ready();
+  async ready(): Promise<void> {
+    // Keep the optional Zod peer out of workspaces that do not enable this mode.
+    this.#schemas ??= await import("./schemas");
+    await this.repository.ready();
   }
 
   list(): CodeLibraryRun[] {
-    return [...this.repository.filesSnapshot()]
-      .filter(([path]) => /^runs\/[^/]+\/metadata\.json$/.test(path))
-      .map(([, content]) => JSON.parse(content) as CodeLibraryRun);
+    const runs: CodeLibraryRun[] = [];
+
+    if (!this.#schemas) return runs;
+
+    for (const [path, content] of this.repository.filesSnapshot()) {
+      if (/^runs\/[^/]+\/metadata\.json$/.test(path))
+        runs.push(this.#schemas.run.parse(JSON.parse(content)));
+    }
+
+    return runs;
   }
 
   read(id: string): CodeLibraryRun & { code: string } {
+    if (!this.#schemas) throw new Error("Call codeLibrary.ready() before reading saved code");
     const files = this.repository.filesSnapshot();
     const metadata = files.get(`runs/${id}/metadata.json`);
     const code = files.get(`runs/${id}/code.js`);
     if (metadata === undefined || code === undefined) throw new Error(`Unknown saved run: ${id}`);
-    return { ...(JSON.parse(metadata) as CodeLibraryRun), code };
+
+    return { ...this.#schemas.run.parse(JSON.parse(metadata)), code };
   }
 
   start(
@@ -87,10 +99,13 @@ export class CodeLibrary {
         purpose: metadata.purpose ?? "",
         status: "started",
         createdAt: new Date().toISOString(),
-        ...(metadata.conversationId ? { conversationId: metadata.conversationId } : {}),
-        ...(metadata.toolCallId ? { toolCallId: metadata.toolCallId } : {}),
-        ...(metadata.cwd ? { cwd: metadata.cwd } : {}),
       };
+
+      if (metadata.conversationId) run.conversationId = metadata.conversationId;
+
+      if (metadata.toolCallId) run.toolCallId = metadata.toolCallId;
+
+      if (metadata.cwd) run.cwd = metadata.cwd;
       await this.repository.commit(
         {
           [`runs/${id}/code.js`]: code,
@@ -144,8 +159,9 @@ export class CodeLibrary {
         runId: id,
         backend: run.backend,
         code: run.code,
-        ...(run.cwd ? { cwd: run.cwd } : {}),
       };
+
+      if (run.cwd) promoted.cwd = run.cwd;
       await this.repository.commit(
         { [`tools/${name}.json`]: JSON.stringify(promoted, null, 2) },
         `Promote ${name}`,
@@ -155,9 +171,16 @@ export class CodeLibrary {
   }
 
   promoted(): PromotedCode[] {
-    return [...this.repository.filesSnapshot()]
-      .filter(([path]) => /^tools\/[a-z][a-z0-9_]*\.json$/.test(path))
-      .map(([, content]) => JSON.parse(content) as PromotedCode);
+    const tools: PromotedCode[] = [];
+
+    if (!this.#schemas) return tools;
+
+    for (const [path, content] of this.repository.filesSnapshot()) {
+      if (/^tools\/[a-z][a-z0-9_]*\.json$/.test(path))
+        tools.push(this.#schemas.promoted.parse(JSON.parse(content)));
+    }
+
+    return tools;
   }
 
   mount(): Mount {
@@ -179,7 +202,11 @@ export class CodeLibrary {
 
   #serialize<T>(fn: () => Promise<T>): Promise<T> {
     const run = this.#tail.then(fn, fn);
-    this.#tail = run.catch(() => undefined);
+    this.#tail = run.then(
+      () => undefined,
+      () => undefined,
+    );
+
     return run;
   }
 }

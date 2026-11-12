@@ -27,6 +27,19 @@ function library(repository: MemoryRepository) {
 }
 
 describe("code library", () => {
+  it.each(["runs/r/metadata.json", "tools/reviewed.json"])(
+    "rejects malformed artifact metadata in %s",
+    async (path) => {
+      const repository = new MemoryRepository();
+      const lib = library(repository);
+      await lib.ready();
+      repository.files.set(path, JSON.stringify({ status: "succeeded" }));
+      expect(() => (path.startsWith("runs/") ? lib.list() : lib.promoted())).toThrow(
+        /Invalid input/,
+      );
+    },
+  );
+
   it("stores source and minimal context before execution and retains failed attempts", async () => {
     const repository = new MemoryRepository();
     const lib = library(repository);
@@ -45,7 +58,9 @@ describe("code library", () => {
     await lib.finish("codemode", "run-1", 1);
     expect(lib.read(run.id).status).toBe("failed");
     expect(repository.commits[0].get(`runs/${run.id}/code.js`)).toBe(source);
-    expect(library(repository).read(run.id).code).toBe(source);
+    const reopened = library(repository);
+    await reopened.ready();
+    expect(reopened.read(run.id).code).toBe(source);
   });
 
   it("does not report an execution as saved when the artifact write fails", async () => {

@@ -74,7 +74,8 @@ export default {
     if (request.method === "GET" && path === "/library")
       return Response.json(await agent.library());
     if (request.method === "POST" && (path === "/run" || path === "/promote")) {
-      const body: unknown = await request.json().catch(() => null);
+      const body = await request.json().catch(() => null);
+
       if (path === "/run") {
         const parsed = taskSchema.safeParse(body);
         if (!parsed.success) return new Response("Expected { task: string }", { status: 400 });

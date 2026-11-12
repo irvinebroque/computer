@@ -1,6 +1,5 @@
 import { posix } from "node:path";
 import type { Database } from "@cloudflare/dofs";
-import type { HttpClient } from "isomorphic-git";
 import type { ArtifactClient } from "../artifacts/index";
 import { withFetch } from "../git/http";
 import type { CodeLibraryRepository } from "./library";
@@ -27,9 +26,9 @@ export class GitCodeLibraryRepository implements CodeLibraryRepository {
   }
 
   ready(): Promise<void> {
-    this.#ready ??= this.#initialize().catch((error: unknown) => {
+    this.#ready ??= this.#initialize().catch((cause: unknown) => {
       this.#ready = undefined;
-      throw error;
+      throw cause;
     });
     return this.#ready;
   }
@@ -59,7 +58,7 @@ export class GitCodeLibraryRepository implements CodeLibraryRepository {
     // An interrupted initial clone is safe to start over; no executions used it yet.
     this.#fs.reset();
     const auth = await this.#auth();
-    const http = withFetch(globalThis.fetch) as unknown as HttpClient;
+    const http = withFetch(globalThis.fetch);
     const refs = await git.listServerRefs({ http, url: this.#remote, ...auth });
     if (refs.some((ref) => ref.ref === "refs/heads/main")) {
       await git.clone({
@@ -107,13 +106,13 @@ export class GitCodeLibraryRepository implements CodeLibraryRepository {
 
   async flush(): Promise<void> {
     if (!this.#fs.exists("/.git/refs/heads/main")) return;
-    const head = await this.#fs.promises.readFile("/.git/refs/heads/main", "utf8");
-    if (typeof head !== "string") throw new Error("Expected a Git ref");
+    const head = (await this.#fs.promises.readFile("/.git/refs/heads/main")).toString();
+
     if (head.trim() === this.#version) return;
     const git = await import("isomorphic-git");
     const result = await git.push({
       fs: this.#fs,
-      http: withFetch(globalThis.fetch) as unknown as HttpClient,
+      http: withFetch(globalThis.fetch),
       dir: "/",
       url: this.#remote,
       ref: "main",

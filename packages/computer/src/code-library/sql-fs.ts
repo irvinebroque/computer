@@ -35,13 +35,14 @@ export class SqlGitFilesystem {
     this.promises = {
       stat,
       lstat: stat,
-      readFile: async (path: string, options?: string | { encoding?: string }) => {
+      readFile: async (path: string, options?: BufferEncoding | { encoding?: BufferEncoding }) => {
         const content = this.entry(path).content;
         if (content === null) throw fsError("EISDIR", path);
         const bytes = Buffer.from(content);
-        return (typeof options === "string" ? options : options?.encoding)
-          ? bytes.toString("utf8")
-          : bytes;
+
+        const encoding = typeof options === "string" ? options : options?.encoding;
+
+        return encoding ? bytes.toString(encoding) : bytes;
       },
       writeFile: async (path: string, content: Uint8Array | string) => {
         path = posix.resolve("/", path);
@@ -62,10 +63,17 @@ export class SqlGitFilesystem {
       readdir: async (path: string) => {
         path = posix.resolve("/", path);
         if (this.entry(path).content !== null) throw fsError("ENOTDIR", path);
-        return db
-          .all<Entry>("SELECT path FROM workspace_code_library_git")
-          .filter((entry) => entry.path !== path && posix.dirname(entry.path) === path)
-          .map((entry) => posix.basename(entry.path));
+
+        const children: string[] = [];
+
+        for (const entry of db.all<Pick<Entry, "path">>(
+          "SELECT path FROM workspace_code_library_git",
+        )) {
+          if (entry.path !== path && posix.dirname(entry.path) === path)
+            children.push(posix.basename(entry.path));
+        }
+
+        return children;
       },
       unlink: async (path: string) => {
         if (this.entry(path).content === null) throw fsError("EISDIR", path);
