@@ -558,29 +558,66 @@ backend exposes an `artifacts` command. See
 
 ### Durable code libraries
 
-Set `codeLibrary: true` on a Workspace with a scoped Artifacts binding to save
-module executions automatically. Computer pushes source and a small metadata
-record before dispatch, then records the observed exit code. The agent can read
-and search earlier runs at the read-only `/workspace/.code-library` mount.
+Select an Artifacts repository independently of the Workspace session. Computer
+pushes module source and execution context before dispatch, then records the
+observed exit code. Agents search earlier runs through ordinary file tools at
+the read-only `/workspace/.code-library` mount. Reuse does not require promotion.
 
 ```ts
 const workspace = new Workspace({
   storage: ctx.storage,
   sessionId: ctx.id.toString(),
-  artifacts: { binding: env.ARTIFACTS },
   backends: [new CodemodeBackend({ loader: env.LOADER })],
-  codeLibrary: true,
+  codeLibrary: { binding: env.ARTIFACTS, repository: "finance-code" },
 });
 await workspace.ready();
+await workspace.codeLibrary?.refresh(); // at the start of a turn
 const tools = createAITools({ workspace });
 ```
 
-The exec tool adds a required `purpose` field when this mode is enabled. Host
-calls can set `metadata: { purpose, conversationId }` on `runtime.exec()`.
-`workspace.codeLibrary.list()` and `.read(id)` expose committed runs to the
-host. After human review, `.promote(id, name, description)` pins successful
-source as `saved_<name>` in subsequent AI SDK tool sets. Promotion is never
-offered as an agent tool.
+The binding selects a namespace. The repository name selects sharing and
+lifetime independently of the session:
+
+```mermaid
+flowchart LR
+  A[Session A] --> F["Artifact: finance-code"]
+  B[Session B] --> F
+  C[Session C] --> E["Artifact: engineering-code"]
+```
+
+| Configuration | Behavior |
+| --- | --- |
+| Default writer | Automatically capture source, purpose, ids, timestamps, and observed outcomes. |
+| `capture: false` | Disable automatic capture; keep host curation access. |
+| `readOnly: true` | Read an existing repo using read tokens; no capture or curation. |
+| `codeLibrary: true` | Per-agent convenience: use scoped `artifacts` and a non-empty `sessionId` to select `<sessionId>__code-library`. |
+
+| Host API | Behavior |
+| --- | --- |
+| `ready()` | Load the initial snapshot. |
+| `codeLibrary.refresh()` | Fetch a new snapshot and update the read-only mount. |
+| `codeLibrary.list()` / `.read(id)` | Inspect saved metadata and source. |
+| `.promote(id, name, description)` | Pin successful source with an approval timestamp. |
+| `.unpromote(name)` | Remove a reviewed tool. |
+| `.deleteRun(id)` | Remove an unpromoted run from the current tree. |
+
+Named tools are optional, with a JSON-encoded `input` object described by the
+host. Reuse through files works without them:
+
+```ts
+await workspace.codeLibrary?.promote(runId, "sum_amounts", description);
+const tools = createAITools({ workspace, savedCodeTools: true });
+```
+
+- Call `refresh()` at turn boundaries. Reads keep that snapshot until refresh or a local library write.
+- Coordinate one writer per repository. Writes synchronize; conflicting pushes retain local commits and reject. No automatic merge or force-push.
+- Keep one repository identity per local storage database.
+- Session termination does not delete the repo. Tree deletions retain Git history; delete or rotate the Artifact for full retention.
+- Host calls can attach `metadata: { purpose, conversationId, sessionId }`. Run keys include the Workspace session or a durable local identity.
+- Promotion and retention are host operations; neither is offered to the model.
+
+The explicit form needs no separate `artifacts` option and does not expose
+the library binding through the shell's Artifacts command.
 
 See [`examples/durable-code`](../../examples/durable-code) for the full example,
 including failure behavior and the source-only reuse contract.

@@ -66,7 +66,7 @@ export class WorkspaceRuntime {
 
   /** Whether module executions are automatically saved for later reuse. */
   get codeLibraryEnabled(): boolean {
-    return this.#options.codeLibrary !== undefined;
+    return this.#options.codeLibrary?.captureEnabled ?? false;
   }
 
   // Whether the named backend accepts a structured `input` value and
@@ -287,7 +287,9 @@ export class WorkspaceRuntime {
   #libraryFor(backend: string): CodeLibrary | undefined {
     const registered = this.#options.backends.get(backend);
 
-    return registered && isModuleBackend(registered) ? this.#options.codeLibrary : undefined;
+    return registered && isModuleBackend(registered) && this.#options.codeLibrary?.captureEnabled
+      ? this.#options.codeLibrary
+      : undefined;
   }
 }
 

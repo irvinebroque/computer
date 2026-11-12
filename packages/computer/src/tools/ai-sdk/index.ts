@@ -19,7 +19,10 @@ import {
 export { forAISDKTools } from "./bindings";
 
 /** Options for {@link createAITools}. */
-export type CreateAIToolsOptions = CreateToolsOptions;
+export type CreateAIToolsOptions = CreateToolsOptions & {
+  /** Register the host-reviewed saved tools from the current library snapshot. Defaults to false. */
+  savedCodeTools?: boolean;
+};
 
 export {
   createDeleteTool,
@@ -66,7 +69,7 @@ export function createAITools(options: CreateAIToolsOptions): ToolSet {
 
     const backends = exec.workspace.runtime.backends?.() ?? [];
 
-    for (const saved of workspace.codeLibrary?.promoted() ?? []) {
+    for (const saved of options.savedCodeTools ? (workspace.codeLibrary?.promoted() ?? []) : []) {
       if (exec.backends && !Object.hasOwn(exec.backends, saved.backend)) continue;
 
       if (

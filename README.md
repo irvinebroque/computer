@@ -95,8 +95,8 @@ public surface. Each is a Worker workspace with its own README.
   in a workspace and publishes it to Cloudflare Artifacts as a
   clone-ready repo.
 - [`examples/durable-code`](examples/durable-code) — an Agents SDK agent
-  saves generated JavaScript to Artifacts, retrieves it in later conversations,
-  and offers reviewed code as tools.
+  shares captured JavaScript through an application-selected Artifacts repo,
+  retrieves it across sessions, and optionally offers reviewed code as tools.
 - [`examples/assets`](examples/assets) — turns a prompt into an image with
   Workers AI, writes it to the workspace, and returns a shareable link
   through `@cloudflare/computer/assets`.

@@ -164,5 +164,6 @@ export {
   CODE_LIBRARY_ROOT,
   CODE_LIBRARY_GUIDANCE,
   type CodeLibraryRun,
+  type CodeLibraryOptions,
   type PromotedCode,
 } from "./code-library/library";

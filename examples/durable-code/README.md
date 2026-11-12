@@ -1,135 +1,218 @@
-# Durable code library
+# Shared durable code library
 
-An Agents SDK agent remembers JavaScript it wrote in earlier conversations.
-Computer saves each module execution to a Cloudflare Artifacts repository,
-along with its purpose, time, execution id, conversation id, and outcome.
-The agent can search and read that code on later requests. A human can review
-a successful run and promote its source into a named tool.
+Save generated JavaScript to an Artifact. Let later sessions find and reuse it.
+Optionally review a successful run and expose it as a named tool.
 
-The switch is `codeLibrary: true`:
+```mermaid
+flowchart LR
+  A[Session Alice] --> W[One durable host writer]
+  B[Session Bob] --> W
+  W -->|capture source and outcomes| R["Artifact: finance-code"]
+  R -->|refresh| F[Read-only mounted files]
+  F -->|search, read, reuse| W
+  R -->|optional host review| T[Opt-in named tools]
+```
+
+## Select the library
 
 ```ts
 const workspace = new Workspace({
-  storage: this.ctx.storage,
-  sessionId: this.ctx.id.toString(),
-  artifacts: { binding: this.env.ARTIFACTS },
-  backends: [new CodemodeBackend({ loader: this.env.LOADER })],
-  codeLibrary: true,
+  storage: ctx.storage,
+  sessionId,
+  backends: [new CodemodeBackend({ loader: env.LOADER })],
+  codeLibrary: { binding: env.ARTIFACTS, repository: "finance-code" },
 });
 
 await workspace.ready();
+await workspace.codeLibrary?.refresh(); // start of each turn
 const tools = createAITools({ workspace });
 ```
 
-The `exec` tool asks the model for a short `purpose`. Computer commits and
-pushes the source before starting the sandbox, then records the observed exit
-code. The repository is named `<sessionId>__code-library` in the configured
-Artifacts namespace. It contains:
+| Choice | Result |
+| --- | --- |
+| Same binding + `"finance-code"` | Sessions share one library. |
+| Different repository names | Libraries stay separate. |
+| Session ends | The Artifact remains. |
+| `capture: false` | Read and curate without automatically saving executions. |
+| `readOnly: true` | Read an existing library using read tokens; no capture or curation. |
 
-```text
-runs/<id>/code.js
-runs/<id>/metadata.json
-tools/<reviewed-name>.json
-```
+The binding selects a namespace. The repository name selects the sharing and
+retention boundary. In an application, derive that name from the authorized
+user or project.
 
-The agent sees these files at `/workspace/.code-library` through its normal
-`ls`, `grep`, and `read` tools. This mount is read-only. Git's working files and
-credentials stay in the host, outside the agent's filesystem.
-
-## Run
-
-From the repository root:
+## Run across sessions
 
 ```sh
+# From the repository root:
 npm install
 npm run build --workspace @cloudflare/computer
 cd examples/durable-code
 cp .dev.vars.example .dev.vars
-# Replace DEMO_TOKEN in .dev.vars with a random secret.
+# Set DEMO_TOKEN to a random secret in .dev.vars, then:
 cf dev
 ```
 
-This example needs access to Artifacts and Workers AI. Both bindings are remote
-during local development. The `cf` CLI currently requires Wrangler to be
-installed directly in the example's `node_modules`. If npm hoisted it to the
-repository root, link that installation once before `cf dev`:
+Artifacts and Workers AI use remote bindings. If `cf dev` cannot find the
+hoisted Wrangler installation, run:
 
 ```sh
 mkdir -p node_modules
 ln -s ../../../node_modules/wrangler node_modules/wrangler
 ```
 
-Set `DEMO_TOKEN` in your terminal to the value in `.dev.vars`, then make a task
-that produces a reusable function:
+Set `DEMO_TOKEN` in your terminal. Alice creates code:
 
 ```sh
-curl http://localhost:8787/run \
+curl 'http://localhost:8787/run?repository=finance-code' \
   -H "Authorization: Bearer $DEMO_TOKEN" \
   -H 'Content-Type: application/json' \
-  -d '{"task":"Write and execute a reusable JavaScript function that sums input.amounts. Try it with [12, 8, 5]."}'
+  -d '{"sessionId":"alice","task":"Write and execute a function that sums input.amounts. Try [12, 8, 5]."}'
 ```
 
-Each `/run` call starts a fresh conversation with the same agent. Ask it to use
-the library in a subsequent request:
+Bob reuses it in a fresh conversation, before any promotion:
 
 ```sh
-curl http://localhost:8787/run \
+curl 'http://localhost:8787/run?repository=finance-code' \
   -H "Authorization: Bearer $DEMO_TOKEN" \
   -H 'Content-Type: application/json' \
-  -d '{"task":"Find the sum function in your code library and use it with [3, 4, 9]."}'
+  -d '{"sessionId":"bob","task":"Find the sum function in your library and use it with [3, 4, 9]."}'
 ```
 
-## Review and promote
+Change `repository=engineering-code` to use another library and writer.
+The default is `finance-code`. Every endpoint requires the demo token.
 
-Read the source and metadata:
+## Read a consistent snapshot
+
+The example routes each repository to one durable agent and serializes its
+turns and host operations. Other Workspaces can read the same library:
+
+```ts
+const reader = new Workspace({
+  storage: readerStorage,
+  sessionId: "another-session",
+  codeLibrary: {
+    binding: env.ARTIFACTS,
+    repository: "finance-code",
+    readOnly: true,
+  },
+});
+
+await reader.ready();                       // initial snapshot
+await reader.codeLibrary?.refresh();         // next turn's snapshot
+await reader.fs.grep("sum", "/workspace/.code-library");
+```
+
+| Rule | Behavior |
+| --- | --- |
+| Refresh timing | The host calls `refresh()` at turn boundaries. No background polling. |
+| Between refreshes | Reads use the current snapshot. Local library writes update that Workspace's view. |
+| Writer coordination | One writer per repository; sequential handoffs synchronize before writes. |
+| Conflicting push | Reject and retain the local commit. No force-push or automatic merge. |
+| Local storage | Keep one repository identity per storage database. |
+
+For many autonomous writers, use separate capture repositories and a shared
+curated library. [Artifacts best practices](https://developers.cloudflare.com/artifacts/concepts/best-practices/)
+explain that scaling boundary.
+
+## Optional review and promotion
+
+Inspect the source and metadata:
 
 ```sh
-curl http://localhost:8787/library \
+curl 'http://localhost:8787/library?repository=finance-code' \
   -H "Authorization: Bearer $DEMO_TOKEN"
 ```
 
-Choose a successful run's `id`, review its source, then promote it:
+Choose a successful run, review it, and promote it:
 
 ```sh
-curl http://localhost:8787/promote \
+curl 'http://localhost:8787/promote?repository=finance-code' \
   -H "Authorization: Bearer $DEMO_TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{"id":"<run id>","name":"sum_amounts","description":"Sum input.amounts, an array of numbers; return the total."}'
 ```
 
-The next `/run` exposes `saved_sum_amounts`. Promotion pins the reviewed source;
-calling the tool supplies `input` as a JSON-encoded object, which Computer parses
-and passes to its default export in the same sandbox. Tool calls are saved as
-new executions too. The model has no
-promotion tool. The host endpoint requires the demo token, which is never
-passed to generated code.
-
-The equivalent host operation is:
+Set `useReviewedTools: true` in a later `/run` body to expose
+`saved_sum_amounts`. The equivalent host API is:
 
 ```ts
 await workspace.codeLibrary?.promote(runId, "sum_amounts", description);
+const tools = createAITools({ workspace, savedCodeTools: true });
 ```
 
-Call `createAITools()` after `await workspace.ready()` on each turn to pick up
-promotions. The AI SDK adapter adds the named tools; other adapters still
-support capture and filesystem retrieval.
+The tool accepts a JSON-encoded `input` object. Its description explains the
+fields. Promotion pins the source and records `approvedAt`. Rebuild the tool
+set after refresh to pick up review decisions. Without the opt-in, file-based
+reuse still works.
 
-## Scope
+## Retention and host API
 
-This is source reuse, not an execution cache. Inputs, environment variables,
-outputs, imported files, and external dependencies are not copied into the
-artifact. Review self-contained functions for promotion. Their tool
-descriptions should explain the expected JSON input.
+These operations belong to the host; none becomes a model tool.
 
-The initial implementation makes a Git push for capture and another for the
-outcome. If capture cannot be pushed, execution does not start. If the process
-is interrupted or its terminal event is never consumed, the run remains
-`started`; reading its execution handle later can record the outcome. An
-outcome push failure is logged without hiding the execution's result. The local
-commit is retried on the next library mutation or terminal-event replay. A
-successful run means exit code zero, not a correctness or safety review.
+| API | Purpose | Demo endpoint |
+| --- | --- | --- |
+| `list()` / `read(id)` | Inspect captured source and outcomes. | `GET /library` |
+| `refresh()` | Load a new committed snapshot and update the mount. | Before every turn |
+| `promote(id, name, description)` | Approve and pin successful source. | `POST /promote` |
+| `promoted()` | List reviewed code. | Included in `/library` |
+| `unpromote(name)` | Remove a reviewed tool. | `DELETE /tools/<name>` |
+| `deleteRun(id)` | Remove an unpromoted run from the current tree. | `DELETE /runs/<id>` |
 
-Use one Workspace writer per agent session. A rejected push stops the operation
-instead of overwriting concurrent remote changes. Keep the same session id for
-the lifetime of the agent. Shell commands and JavaScript launched inside a shell
-are outside this mode; capture happens at Computer's module execution boundary.
+All endpoints accept `?repository=finance-code`. For example:
+
+```ts
+await workspace.codeLibrary?.unpromote("sum_amounts");
+await workspace.codeLibrary?.deleteRun(runId);
+```
+
+Git history retains deleted files. Rotate or delete the Artifact for the full
+retention boundary; use fresh local storage for another repository identity.
+
+## What gets saved
+
+Pass a self-contained module to `exec`. For example, the host API captures this
+source and purpose:
+
+```ts
+using run = await workspace.runtime.exec(
+  "export default ({ amounts }) => amounts.reduce((sum, n) => sum + n, 0)",
+  {
+    backend: "codemode",
+    input: { amounts: [12, 8, 5] },
+    metadata: { purpose: "Sum invoice amounts", sessionId: "alice" },
+  },
+);
+await run.result(); // result: 25
+```
+
+```text
+/workspace/.code-library/
+  runs/<id>/code.js
+  runs/<id>/metadata.json  # purpose, ids, timestamps, status, exit code
+  tools/<name>.json       # optional reviewed source and approval time
+```
+
+| Event | Result |
+| --- | --- |
+| Capture push fails | Execution does not start. |
+| Dispatch acknowledgement is lost | Status stays `started` until a terminal event is observed. |
+| Outcome push fails | Return the actual result; retain the local outcome for retry. |
+| Execution handle is replayed | Record the observed outcome. |
+
+Capture saves module source. Inputs, environment variables, output, imported
+files, dependencies, and shell-launched JavaScript are outside this snapshot.
+Git data and credentials stay outside the read-only mount. A successful exit
+does not imply human approval.
+
+## Existing snippets, skills, and per-agent mode
+
+| Need | Use |
+| --- | --- |
+| Connector-backed Code Mode scripts | Existing [`saveSnippet` / `codemode.search` / `codemode.run`](https://github.com/cloudflare/agents/blob/main/docs/codemode/snippets.md). |
+| Computer module source across sessions | This Artifact-backed library. |
+| Curated instructions and supporting scripts | [Workspace skills](https://developers.cloudflare.com/agents/skills/sources/computer/). |
+| Per-agent convenience | `codeLibrary: true` with scoped `artifacts` and a non-empty `sessionId`; selects `<sessionId>__code-library`. |
+
+Code Mode snippets store connector function source on their durable runtime;
+Computer runs modules with a default export. The snippet runtime has no storage
+provider hook, so this example does not change its store or execution contract.

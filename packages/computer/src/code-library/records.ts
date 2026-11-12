@@ -38,6 +38,7 @@ export function parseRun(text: string): CodeLibraryRun {
     purpose: stringField(record, "purpose"),
     createdAt,
     status,
+    sessionId: optionalString(record, "sessionId"),
     conversationId: optionalString(record, "conversationId"),
     toolCallId: optionalString(record, "toolCallId"),
     cwd: optionalString(record, "cwd"),
@@ -50,6 +51,9 @@ export function parsePromoted(text: string): PromotedCode {
   const record = parseRecord(text);
   const name = stringField(record, "name");
   const description = stringField(record, "description").trim();
+  const approvedAt = optionalString(record, "approvedAt");
+
+  if (approvedAt !== undefined) validateTime(approvedAt);
 
   if (!/^[a-z][a-z0-9_]{0,63}$/.test(name) || !description)
     throw new Error("Invalid input: code library tool needs a valid name and description");
@@ -60,6 +64,7 @@ export function parsePromoted(text: string): PromotedCode {
     runId: runId(record, "runId"),
     backend: stringField(record, "backend"),
     code: stringField(record, "code"),
+    approvedAt,
     cwd: optionalString(record, "cwd"),
   };
 }

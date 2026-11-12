@@ -39,7 +39,7 @@ import {
 } from "./artifacts/index";
 import type { AssetsClient } from "./assets/index";
 import type { BackendHandle, WorkspaceBackend } from "./backend";
-import { CodeLibrary, CODE_LIBRARY_ROOT } from "./code-library/library";
+import { CodeLibrary, CODE_LIBRARY_ROOT, type CodeLibraryOptions } from "./code-library/library";
 import { GitCodeLibraryRepository } from "./code-library/repository";
 import { ExecutionRuntimeTracker, SqlExecutionRuntimeStore } from "./execution-runtime-tracker";
 import type { GitClient, GitClientFactory, GitIdentity } from "./git/index";
@@ -172,8 +172,8 @@ export interface WorkspaceOptions {
     sessionId?: string | null;
   };
 
-  /** Save module executions in this agent's Artifacts repo and mount their source read-only. Requires a scoped Artifacts binding. */
-  codeLibrary?: boolean;
+  /** Select a code repository independently of the session. `true` uses the session-scoped artifacts client. */
+  codeLibrary?: boolean | CodeLibraryOptions;
 
   // How much command output a run's result keeps, and where the rest
   // goes. Output past the limits is cut to its last lines, like pi's
@@ -282,15 +282,56 @@ export class Workspace {
     initializeSchema(this.#db, this.#now);
 
     if (options.codeLibrary) {
-      if (!options.artifacts || !this.#artifacts.sessionId) {
+      const selection = options.codeLibrary;
+
+      if (selection === true && (!options.artifacts || !this.#artifacts.sessionId)) {
         throw new Error("codeLibrary requires an Artifacts binding and a non-empty sessionId");
       }
 
+      const libraryOptions = selection === true ? undefined : selection;
+
+      if (
+        libraryOptions &&
+        (!libraryOptions.repository.trim() ||
+          libraryOptions.repository !== libraryOptions.repository.trim())
+      )
+        throw new Error(
+          "codeLibrary.repository must be a non-empty repository name without surrounding whitespace",
+        );
+
+      if (libraryOptions?.readOnly && libraryOptions.capture === true)
+        throw new Error("A read-only code library cannot capture executions");
+
+      this.#db.run(
+        "CREATE TABLE IF NOT EXISTS workspace_code_library_origin (id INTEGER PRIMARY KEY CHECK (id = 1), session_id TEXT NOT NULL)",
+      );
+      this.#db.run(
+        "INSERT OR IGNORE INTO workspace_code_library_origin VALUES (1, ?)",
+        crypto.randomUUID(),
+      );
+
+      const origin = this.#db.one<{ session_id: string }>(
+        "SELECT session_id FROM workspace_code_library_origin WHERE id = 1",
+      );
+
+      if (!origin) throw new Error("Code library origin was not initialized");
+
       this.codeLibrary = new CodeLibrary(
-        new GitCodeLibraryRepository(this.#db, this.#artifacts),
+        new GitCodeLibraryRepository(
+          this.#db,
+          libraryOptions ? createArtifact(libraryOptions.binding) : this.#artifacts,
+          libraryOptions?.repository ?? "code-library",
+          libraryOptions?.readOnly ?? false,
+        ),
         async () => {
           this.#mountIndex.invalidate();
           await this.ensureMountsIndexed();
+        },
+        {
+          // Preserve the original key format for the per-agent convenience mode.
+          sessionId: libraryOptions ? this.#sessionId || origin.session_id : undefined,
+          readOnly: libraryOptions?.readOnly,
+          capture: libraryOptions?.capture,
         },
       );
     }

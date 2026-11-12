@@ -51,6 +51,7 @@ beforeEach(() => {
         QUERY_STRING: url.search.slice(1),
         REQUEST_METHOD: request.method,
         CONTENT_TYPE: request.headers.get("content-type") ?? "",
+        HTTP_GIT_PROTOCOL: request.headers.get("git-protocol") ?? "",
       },
       input: Buffer.from(await request.arrayBuffer()),
       maxBuffer: 16 * 1024 * 1024,
@@ -137,6 +138,300 @@ function library(ws: Workspace) {
 }
 
 describe("Artifacts-backed code library", () => {
+  it("recovers an execution using the durable origin when sessionId is omitted", async () => {
+    const storage = new SQLiteTestStorage();
+    const binding = new GitArtifacts();
+
+    const first = new Workspace({
+      storage,
+      codeLibrary: { binding, repository: "finance-code" },
+      backends: [backend([])],
+    });
+
+    await first.runtime.exec("export default () => 42;", { id: "replay" });
+    const run = library(first).list()[0];
+    expect(run.status).toBe("started");
+
+    const reopened = new Workspace({
+      storage,
+      codeLibrary: { binding, repository: "finance-code" },
+      backends: [backend([])],
+    });
+
+    await (await reopened.runtime.getExec("replay")).result();
+    expect(library(reopened).read(run.id)).toMatchObject({
+      sessionId: run.sessionId,
+      status: "succeeded",
+    });
+  });
+
+  it("opens an existing library read-only after upgrading an older checkout", async () => {
+    const storage = new SQLiteTestStorage();
+    const binding = new GitArtifacts();
+    const writer = workspace(storage, binding, []);
+    await (await writer.runtime.exec("export default () => 42;")).result();
+    await new SqlGitFilesystem(writer.db).promises.unlink("/.git/refs/computer/published");
+
+    const reader = new Workspace({
+      storage,
+      codeLibrary: { binding, repository: "agent-one__code-library", readOnly: true },
+    });
+
+    await reader.ready();
+    expect(library(reader).list()[0].status).toBe("succeeded");
+  });
+
+  it("recovers a reader interrupted after checkout but before publishing its snapshot", async () => {
+    const binding = new GitArtifacts();
+    const writer = workspace(new SQLiteTestStorage(), binding, []);
+    await (await writer.runtime.exec("export default () => 1;")).result();
+    const storage = new SQLiteTestStorage();
+
+    const options = {
+      storage,
+      codeLibrary: { binding, repository: "agent-one__code-library", readOnly: true },
+    };
+
+    const reader = new Workspace(options);
+    await reader.ready();
+    const fs = new SqlGitFilesystem(reader.db);
+    const previous = await fs.promises.readFile("/.git/refs/computer/published");
+    await (await writer.runtime.exec("export default () => 2;")).result();
+    await library(reader).refresh();
+    await fs.promises.writeFile("/.git/refs/computer/published", previous);
+
+    const recovered = new Workspace(options);
+    await recovered.ready();
+    expect(library(recovered).list()).toHaveLength(2);
+    expect(
+      library(recovered)
+        .list()
+        .every((run) => run.status === "succeeded"),
+    ).toBe(true);
+  });
+
+  it("keeps capture optional even for an application-owned writer", async () => {
+    const ws = new Workspace({
+      storage: new SQLiteTestStorage(),
+      codeLibrary: { binding: new GitArtifacts(), repository: "reference-code", capture: false },
+      backends: [backend([])],
+    });
+
+    await ws.ready();
+    await (await ws.runtime.exec("export default () => 42;")).result();
+    expect(library(ws).list()).toEqual([]);
+    expect(ws.runtime.codeLibraryEnabled).toBe(false);
+  });
+
+  it("does not create a missing read-only library", async () => {
+    const binding = new GitArtifacts();
+
+    const reader = new Workspace({
+      storage: new SQLiteTestStorage(),
+      codeLibrary: { binding, repository: "missing", readOnly: true },
+    });
+
+    await expect(reader.ready()).rejects.toThrow("no such repo");
+    expect(binding.has("missing")).toBe(false);
+  });
+
+  it("retains a rejected local commit without overwriting a competing writer", async () => {
+    const binding = new GitArtifacts();
+    const calls: string[] = [];
+
+    const first = new Workspace({
+      storage: new SQLiteTestStorage(),
+      sessionId: "one",
+      codeLibrary: { binding, repository: "finance-code" },
+      backends: [backend(calls)],
+    });
+
+    await first.ready();
+    const fetch = vi.mocked(globalThis.fetch).getMockImplementation();
+
+    if (!fetch) throw new Error("Expected the Git transport fake");
+    let rejectPush = true;
+    vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
+      if (rejectPush && String(input).endsWith("/git-receive-pack"))
+        return Promise.reject(new Error("Push interrupted"));
+
+      return fetch(input, init);
+    });
+    await expect(first.runtime.exec("export default () => 1;", { id: "pending" })).rejects.toThrow(
+      "Push interrupted",
+    );
+    expect(calls).toEqual([]);
+    rejectPush = false;
+
+    const second = new Workspace({
+      storage: new SQLiteTestStorage(),
+      sessionId: "two",
+      codeLibrary: { binding, repository: "finance-code" },
+      backends: [backend([])],
+    });
+
+    await (await second.runtime.exec("export default () => 2;")).result();
+    await expect(library(first).refresh()).rejects.toThrow(/push|fast.forward|rejected/i);
+    const privateFS = new SqlGitFilesystem(first.db);
+    const [pending] = await privateFS.promises.readdir("/runs");
+    expect((await privateFS.promises.readFile(`/runs/${pending}/code.js`)).toString()).toBe(
+      "export default () => 1;",
+    );
+
+    const reader = new Workspace({
+      storage: new SQLiteTestStorage(),
+      codeLibrary: { binding, repository: "finance-code", readOnly: true },
+    });
+
+    await reader.ready();
+    expect(library(reader).list()).toHaveLength(1);
+    expect(library(reader).read(library(reader).list()[0].id).code).toBe("export default () => 2;");
+  });
+
+  it.each(["", " finance-code", "finance-code "])(
+    "rejects an ambiguous repository name %j",
+    (repository) => {
+      expect(
+        () =>
+          new Workspace({
+            storage: new SQLiteTestStorage(),
+            codeLibrary: { binding: new GitArtifacts(), repository },
+          }),
+      ).toThrow("repository");
+    },
+  );
+
+  it("shares an explicitly selected artifact across independent sessions", async () => {
+    const binding = new GitArtifacts();
+
+    const writer = new Workspace({
+      storage: new SQLiteTestStorage(),
+      sessionId: "first-session",
+      codeLibrary: { binding, repository: "finance-code" },
+      backends: [backend([])],
+    });
+
+    await (await writer.runtime.exec("export default () => 42;", { id: "same-id" })).result();
+
+    const reader = new Workspace({
+      storage: new SQLiteTestStorage(),
+      sessionId: "second-session",
+      codeLibrary: { binding, repository: "finance-code", readOnly: true },
+      backends: [backend([])],
+    });
+
+    await reader.ready();
+    expect(library(reader).list()).toMatchObject([
+      { sessionId: "first-session", status: "succeeded" },
+    ]);
+    const tokens = binding.repos.get("finance-code")?.tokens;
+    expect(tokens?.at(-1)?.scope).toBe("read");
+    const run = library(reader).list()[0];
+    expect(await reader.fs.readFile(`${CODE_LIBRARY_ROOT}/runs/${run.id}/code.js`, "utf8")).toBe(
+      "export default () => 42;",
+    );
+    await (await reader.runtime.exec(library(reader).read(run.id).code)).result();
+    expect(library(reader).list()).toHaveLength(1);
+    await expect(library(reader).promote(run.id, "answer", "Answer")).rejects.toThrow("read-only");
+    await library(writer).deleteRun(run.id);
+    await library(reader).refresh();
+    expect(library(reader).list()).toEqual([]);
+    await expect(
+      reader.fs.stat(`${CODE_LIBRARY_ROOT}/runs/${run.id}/code.js`),
+    ).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("refreshes a warm reader only at the host's chosen boundary", async () => {
+    const binding = new GitArtifacts();
+
+    const writer = new Workspace({
+      storage: new SQLiteTestStorage(),
+      codeLibrary: { binding, repository: "finance-code" },
+      backends: [backend([])],
+    });
+
+    await (await writer.runtime.exec("export default () => 1;")).result();
+
+    const reader = new Workspace({
+      storage: new SQLiteTestStorage(),
+      codeLibrary: { binding, repository: "finance-code", readOnly: true },
+    });
+
+    await reader.ready();
+    await (await writer.runtime.exec("export default () => 2;")).result();
+    await reader.ready();
+    expect(library(reader).list()).toHaveLength(1);
+    await library(reader).refresh();
+    expect(library(reader).list()).toHaveLength(2);
+
+    for (const run of library(reader).list()) {
+      const metadata = JSON.parse(
+        await reader.fs.readFile(`${CODE_LIBRARY_ROOT}/runs/${run.id}/metadata.json`, "utf8"),
+      );
+
+      expect(metadata.status).toBe("succeeded");
+    }
+  });
+
+  it("synchronizes sequential writers and distinguishes equal execution ids in different sessions", async () => {
+    const binding = new GitArtifacts();
+
+    const first = new Workspace({
+      storage: new SQLiteTestStorage(),
+      sessionId: "one",
+      codeLibrary: { binding, repository: "finance-code" },
+      backends: [backend([])],
+    });
+
+    const second = new Workspace({
+      storage: new SQLiteTestStorage(),
+      sessionId: "two",
+      codeLibrary: { binding, repository: "finance-code" },
+      backends: [backend([])],
+    });
+
+    await first.ready();
+    await second.ready();
+    await (await first.runtime.exec("export default () => 1;", { id: "same-id" })).result();
+    await (await second.runtime.exec("export default () => 2;", { id: "same-id" })).result();
+    await library(first).refresh();
+    const runs = library(first).list();
+    expect(runs).toHaveLength(2);
+    expect(runs.map(({ sessionId }) => sessionId).sort()).toEqual(["one", "two"]);
+    expect(new Set(runs.map(({ id }) => id)).size).toBe(2);
+    expect(runs.every(({ status }) => status === "succeeded")).toBe(true);
+  });
+
+  it("isolates different repository names within the same session", async () => {
+    const binding = new GitArtifacts();
+
+    const first = new Workspace({
+      storage: new SQLiteTestStorage(),
+      sessionId: "one",
+      codeLibrary: { binding, repository: "finance-code" },
+      backends: [backend([])],
+    });
+
+    await (await first.runtime.exec("export default () => 42;")).result();
+
+    const other = new Workspace({
+      storage: new SQLiteTestStorage(),
+      sessionId: "one",
+      codeLibrary: { binding, repository: "engineering-code" },
+    });
+
+    await other.ready();
+    expect(library(other).list()).toEqual([]);
+  });
+
+  it("requires explicit opt-in to register reviewed tools", async () => {
+    const ws = workspace(new SQLiteTestStorage(), new GitArtifacts(), []);
+    await (await ws.runtime.exec("export default () => 42;")).result();
+    await library(ws).promote(library(ws).list()[0].id, "answer", "Return an answer");
+    expect(createAITools({ workspace: ws }).saved_answer).toBeUndefined();
+    expect(createAITools({ workspace: ws, savedCodeTools: true }).saved_answer).toBeDefined();
+  });
+
   it("keeps the library read-only while another capture refreshes its files", async () => {
     const ws = workspace(new SQLiteTestStorage(), new GitArtifacts(), []);
     await ws.ready();
@@ -249,6 +544,8 @@ describe("Artifacts-backed code library", () => {
     expect(run.status).toBe("started");
     expect(errors).toHaveBeenCalledOnce();
     offline = false;
+    await library(ws).refresh();
+    expect(library(ws).read(run.id).status).toBe("succeeded");
     await (await ws.runtime.getExec(handle.id)).result();
     expect(library(ws).read(run.id).status).toBe("succeeded");
 
@@ -356,6 +653,7 @@ describe("Artifacts-backed code library", () => {
 
     const tool = createAITools({
       workspace: restored,
+      savedCodeTools: true,
       exec: {
         output: { maxBytes: 32, maxLines: 2 },
         metadata: ({ toolCallId }) => ({ conversationId: `conversation-for-${toolCallId}` }),
@@ -403,7 +701,9 @@ describe("Artifacts-backed code library", () => {
     });
 
     await restored.ready();
-    expect(createAITools({ workspace: restored }).saved_answer).toBeUndefined();
+    expect(
+      createAITools({ workspace: restored, savedCodeTools: true }).saved_answer,
+    ).toBeUndefined();
   });
 
   it("requires a scoped artifact and leaves disabled workspaces alone", () => {
