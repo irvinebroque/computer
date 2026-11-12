@@ -164,7 +164,7 @@ describe("Artifacts-backed code library", () => {
     });
   });
 
-  it("opens an existing library read-only after upgrading an older checkout", async () => {
+  it("recovers a checkout without a published snapshot marker", async () => {
     const storage = new SQLiteTestStorage();
     const binding = new GitArtifacts();
     const writer = workspace(storage, binding, []);
@@ -402,7 +402,7 @@ describe("Artifacts-backed code library", () => {
     }
   });
 
-  it("synchronizes sequential writers and distinguishes equal execution ids in different sessions", async () => {
+  it("coordinates sequential writers through explicit refresh and keeps execution ids separate", async () => {
     const binding = new GitArtifacts();
 
     const first = new Workspace({
@@ -422,7 +422,18 @@ describe("Artifacts-backed code library", () => {
     await first.ready();
     await second.ready();
     await (await first.runtime.exec("export default () => 1;", { id: "same-id" })).result();
+    await library(second).refresh();
+    const transport = vi.mocked(globalThis.fetch).getMockImplementation();
+
+    if (!transport) throw new Error("Expected the Git transport fake");
+    vi.mocked(globalThis.fetch).mockImplementation((input, init) => {
+      if (String(input).includes("service=git-upload-pack"))
+        return Promise.reject(new Error("Unexpected snapshot fetch between turn boundaries"));
+
+      return transport(input, init);
+    });
     await (await second.runtime.exec("export default () => 2;", { id: "same-id" })).result();
+    vi.mocked(globalThis.fetch).mockImplementation(transport);
     await library(first).refresh();
     const runs = library(first).list();
     expect(runs).toHaveLength(2);

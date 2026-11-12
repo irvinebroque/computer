@@ -17,7 +17,7 @@ import type { WorkspaceRuntimeTruncation, WorkspaceRuntimeValue } from "../../ru
 // and the generated JSON Schema describes a real shape (z.unknown()
 // serializes to an empty schema that some providers reject under
 // strict function calling).
-export const jsonValueSchema: z.ZodType<WorkspaceRuntimeValue> = z.lazy(() =>
+const jsonValueSchema: z.ZodType<WorkspaceRuntimeValue> = z.lazy(() =>
   z.union([
     z.string(),
     z.number(),

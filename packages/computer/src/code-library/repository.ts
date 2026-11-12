@@ -107,7 +107,7 @@ export class GitCodeLibraryRepository implements CodeLibraryRepository {
     await this.#fetchSnapshot();
   }
 
-  async commit(files: Record<string, string>, message: string): Promise<string> {
+  async commit(files: Record<string, string>, message: string): Promise<void> {
     if (this.readOnly) throw new Error("Code library is read-only");
     await this.ready();
     const git = await import("isomorphic-git");
@@ -126,10 +126,8 @@ export class GitCodeLibraryRepository implements CodeLibraryRepository {
       await git.add({ fs: this.#fs, dir: "/", filepath: path });
     }
 
-    const oid = await git.commit({ fs: this.#fs, dir: "/", message, author: AUTHOR });
+    await git.commit({ fs: this.#fs, dir: "/", message, author: AUTHOR });
     await this.flush();
-
-    return oid;
   }
 
   async flush(): Promise<void> {

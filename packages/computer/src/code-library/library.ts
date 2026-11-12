@@ -35,7 +35,7 @@ export interface CodeLibraryRepository {
   ready(): Promise<void>;
   version(): string;
   filesSnapshot(): Map<string, string>;
-  commit(files: Record<string, string>, message: string): Promise<string>;
+  commit(files: Record<string, string>, message: string): Promise<void>;
   flush(): Promise<void>;
   refresh(): Promise<void>;
 }
@@ -105,7 +105,7 @@ export class CodeLibrary {
     return this.#serialize(async () => {
       this.#assertWritable();
       await this.ready();
-      await this.#synchronize();
+      await this.#flushPending();
       const id = this.#runKey(backend, executionId);
       const existing = this.list().find((run) => run.id === id);
 
@@ -209,11 +209,11 @@ export class CodeLibrary {
     return run;
   }
 
-  async #synchronize(): Promise<void> {
+  async #flushPending(): Promise<void> {
     const previous = this.repository.version();
 
     try {
-      await this.repository.refresh();
+      await this.repository.flush();
     } finally {
       if (previous !== this.repository.version()) await this.onChange?.();
     }

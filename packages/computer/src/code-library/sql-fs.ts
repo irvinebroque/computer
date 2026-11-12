@@ -15,7 +15,7 @@ export class SqlGitFilesystem {
     db.run("INSERT OR IGNORE INTO workspace_code_library_git VALUES ('/', NULL, 0)");
 
     const stat = async (path: string) => {
-      const entry = this.entry(path);
+      const entry = this.#entry(path);
       const directory = entry.content === null;
 
       return {
@@ -39,7 +39,7 @@ export class SqlGitFilesystem {
       stat,
       lstat: stat,
       readFile: async (path: string, options?: BufferEncoding | { encoding?: BufferEncoding }) => {
-        const content = this.entry(path).content;
+        const content = this.#entry(path).content;
 
         if (content === null) throw fsError("EISDIR", path);
         const bytes = Buffer.from(content);
@@ -51,7 +51,7 @@ export class SqlGitFilesystem {
       writeFile: async (path: string, content: Uint8Array | string) => {
         path = posix.resolve("/", path);
 
-        if (this.entry(posix.dirname(path)).content !== null) throw fsError("ENOTDIR", path);
+        if (this.#entry(posix.dirname(path)).content !== null) throw fsError("ENOTDIR", path);
         db.run(
           "INSERT OR REPLACE INTO workspace_code_library_git VALUES (?, ?, ?)",
           path,
@@ -64,13 +64,13 @@ export class SqlGitFilesystem {
 
         if (this.exists(path)) throw fsError("EEXIST", path);
 
-        if (this.entry(posix.dirname(path)).content !== null) throw fsError("ENOTDIR", path);
+        if (this.#entry(posix.dirname(path)).content !== null) throw fsError("ENOTDIR", path);
         db.run("INSERT INTO workspace_code_library_git VALUES (?, NULL, ?)", path, Date.now());
       },
       readdir: async (path: string) => {
         path = posix.resolve("/", path);
 
-        if (this.entry(path).content !== null) throw fsError("ENOTDIR", path);
+        if (this.#entry(path).content !== null) throw fsError("ENOTDIR", path);
 
         const children: string[] = [];
 
@@ -84,7 +84,7 @@ export class SqlGitFilesystem {
         return children;
       },
       unlink: async (path: string) => {
-        if (this.entry(path).content === null) throw fsError("EISDIR", path);
+        if (this.#entry(path).content === null) throw fsError("EISDIR", path);
         db.run("DELETE FROM workspace_code_library_git WHERE path = ?", posix.resolve("/", path));
       },
       rmdir: async (path: string) => {
@@ -98,7 +98,7 @@ export class SqlGitFilesystem {
         throw fsError("ENOSYS", path);
       },
       chmod: async (path: string) => {
-        this.entry(path);
+        this.#entry(path);
       },
     };
   }
@@ -112,7 +112,7 @@ export class SqlGitFilesystem {
     );
   }
 
-  entry(path: string): Entry {
+  #entry(path: string): Entry {
     const entry = this.db.one<Entry>(
       "SELECT * FROM workspace_code_library_git WHERE path = ?",
       posix.resolve("/", path),

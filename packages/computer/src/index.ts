@@ -160,7 +160,7 @@ export { Workspace, type WorkspaceGitFactory, type WorkspaceOptions } from "./wo
 export { WORKSPACE_ROOT } from "./workspace-root";
 
 export {
-  CodeLibrary,
+  type CodeLibrary,
   CODE_LIBRARY_ROOT,
   CODE_LIBRARY_GUIDANCE,
   type CodeLibraryRun,
